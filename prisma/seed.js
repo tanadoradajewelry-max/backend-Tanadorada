@@ -1,10 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+// src/seed.js
+import { pool } from "./lib/db.js";
 
-const prisma = new PrismaClient();
-
-// Mismos IDs y datos que src/data/storeData.js del frontend, para que
-// el frontend y el backend hablen de los mismos productos mientras
-// migras a manejar el catálogo 100% desde acá.
 const products = [
   {
     id: "collar-gitana-gold",
@@ -37,19 +33,24 @@ const products = [
 ];
 
 async function main() {
-  for (const product of products) {
-    await prisma.product.upsert({
-      where: { id: product.id },
-      update: product,
-      create: product,
-    });
+  for (const p of products) {
+    // Equivalente a prisma.product.upsert
+    await pool.query(
+      `INSERT INTO Product (id, title, price, image, badge)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         title = VALUES(title),
+         price = VALUES(price),
+         image = VALUES(image),
+         badge = VALUES(badge)`,
+      [p.id, p.title, p.price, p.image, p.badge]
+    );
   }
   console.log(`Seed listo: ${products.length} productos.`);
+  await pool.end();
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  })
-  .finally(() => prisma.$disconnect());
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
