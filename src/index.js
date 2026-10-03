@@ -2,7 +2,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import path from "node:path";
 import { pool } from "./lib/db.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
@@ -26,13 +25,17 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders:  ["Content-Type", "Authorization", "x-admin-password"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-admin-password"],
   })
 );
 
 app.options("*", cors());
-app.use(express.json());
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+// Límite subido a 15mb: las imágenes ahora viajan como texto base64
+// dentro del JSON (producto individual o bloques de contenido con
+// varias imágenes), y el límite por defecto de Express (100kb) se
+// queda corto para eso.
+app.use(express.json({ limit: "15mb" }));
 
 app.get("/api/health", async (req, res) => {
   const info = {
