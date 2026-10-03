@@ -15,12 +15,15 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
   .map((o) => o.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
+console.log("🌐 Orígenes permitidos:", allowedOrigins);
+
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       const clean = origin.replace(/\/$/, "");
       if (allowedOrigins.includes(clean)) return callback(null, true);
+      console.warn(`❌ CORS bloqueado: ${origin}`);
       return callback(null, false);
     },
     credentials: true,
@@ -44,6 +47,7 @@ app.get("/api/health", async (req, res) => {
     cors: allowedOrigins,
     db: null,
   };
+
   try {
     const conn = await pool.getConnection();
     const [rows] = await conn.query("SELECT 1 AS ok");
@@ -53,6 +57,7 @@ app.get("/api/health", async (req, res) => {
     info.status = "degraded";
     info.db = { connected: false, error: err.message, code: err.code };
   }
+
   res.json(info);
 });
 
