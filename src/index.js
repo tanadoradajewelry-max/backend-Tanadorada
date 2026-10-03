@@ -10,7 +10,7 @@ import { uploadRouter } from "./routes/upload.js";
 
 const app = express();
 
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.use(cors({ origin: process.env.FRONTEND_URL || "https://forestgreen-alligator-342469.hostingersite.com/" }));
 app.use(express.json());
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
