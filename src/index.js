@@ -3,7 +3,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "node:path";
-import { pool, testConnection } from "./lib/db.js";
+import { testConnection } from "./lib/db.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
 import { uploadRouter } from "./routes/upload.js";
@@ -33,43 +33,14 @@ app.use(
   })
 );
 
+// Responde a preflight OPTIONS
 app.options("*", cors());
 
 app.use(express.json());
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-// --- HEALTH CHECK con diagnóstico completo ---
-app.get("/api/health", async (req, res) => {
-  const info = {
-    status: "ok",
-    env: {
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      databaseUrlPrefix: process.env.DATABASE_URL?.slice(0, 30) + "...",
-      port: process.env.PORT,
-      frontendUrl: process.env.FRONTEND_URL,
-      nodeEnv: process.env.NODE_ENV,
-    },
-    cors: allowedOrigins,
-    db: null,
-  };
-
-  try {
-    const conn = await pool.getConnection();
-    const [rows] = await conn.query("SELECT 1 AS ok");
-    conn.release();
-    info.db = { connected: true, result: rows };
-  } catch (err) {
-    info.status = "degraded";
-    info.db = {
-      connected: false,
-      error: err.message,
-      code: err.code,
-      errno: err.errno,
-      sqlState: err.sqlState,
-    };
-  }
-
-  res.json(info);
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", cors: allowedOrigins });
 });
 
 app.use("/api/products", productsRouter);
@@ -83,15 +54,8 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 
-// ⚠️ NO mata el proceso si la BD falla — solo loguea.
-// Así el servidor sigue vivo y /api/health puede mostrar el error real.
-try {
-  await testConnection();
-} catch (err) {
-  console.error("⚠️  Error de conexión a MySQL al arrancar:", err.message);
-  console.error("   La API arrancará igual; revisa /api/health para más detalles.");
-}
+await testConnection();
 
 app.listen(PORT, () => {
-  console.log(`✅ Tanadorada API corriendo en el puerto ${PORT}`);
+  console.log(`Tanadorada API corriendo en el puerto ${PORT}`);
 });
