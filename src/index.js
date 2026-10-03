@@ -7,6 +7,7 @@ import { pool } from "./lib/db.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
 import { uploadRouter } from "./routes/upload.js";
+import { contentRouter } from "./routes/content.js";
 
 const app = express();
 
@@ -15,20 +16,17 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
   .map((o) => o.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-console.log("🌐 Orígenes permitidos:", allowedOrigins);
-
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
       const clean = origin.replace(/\/$/, "");
       if (allowedOrigins.includes(clean)) return callback(null, true);
-      console.warn(`❌ CORS bloqueado: ${origin}`);
       return callback(null, false);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-admin-password"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -47,7 +45,6 @@ app.get("/api/health", async (req, res) => {
     cors: allowedOrigins,
     db: null,
   };
-
   try {
     const conn = await pool.getConnection();
     const [rows] = await conn.query("SELECT 1 AS ok");
@@ -57,13 +54,13 @@ app.get("/api/health", async (req, res) => {
     info.status = "degraded";
     info.db = { connected: false, error: err.message, code: err.code };
   }
-
   res.json(info);
 });
 
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
+app.use("/api/content", contentRouter);
 
 app.use((err, req, res, next) => {
   console.error("Error no manejado:", err);
