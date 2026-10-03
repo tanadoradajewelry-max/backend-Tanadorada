@@ -1,32 +1,19 @@
-// src/routes/content.js
 import { Router } from "express";
 import { pool, query, queryOne } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 
 export const contentRouter = Router();
 
-// Helper: convierte el valor guardado (longtext) en objeto JS.
-// Si por alguna razón ya viniera como objeto, lo devuelve tal cual.
-function parseValue(raw) {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === "string") {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return raw;
-    }
-  }
-  return raw;
-}
-
-// GET /api/content — devuelve TODOS los bloques en una sola petición.
+// GET /api/content — devuelve TODOS los bloques de una vez, como un
+// objeto { hero: {...}, category_strip: [...], ... }. Así el frontend
+// hace una sola petición al cargar la portada.
 contentRouter.get("/", async (req, res) => {
   try {
     const rows = await query("SELECT `key`, value FROM SiteContent");
     const content = {};
-    for (const row of rows) {
-      content[row.key] = parseValue(row.value);
-    }
+    rows.forEach((row) => {
+      content[row.key] = row.value;
+    });
     res.json(content);
   } catch (error) {
     console.error("Error obteniendo contenido:", error);
@@ -34,7 +21,7 @@ contentRouter.get("/", async (req, res) => {
   }
 });
 
-// PUT /api/content/:key — crea o actualiza un bloque (admin).
+// PUT /api/content/:key — crea o actualiza un bloque completo (admin).
 contentRouter.put("/:key", requireAdmin, async (req, res) => {
   try {
     const { key } = req.params;
@@ -51,8 +38,7 @@ contentRouter.put("/:key", requireAdmin, async (req, res) => {
       "SELECT value FROM SiteContent WHERE `key` = ?",
       [key]
     );
-
-    res.json(parseValue(updated.value));
+    res.json(updated.value);
   } catch (error) {
     console.error("Error guardando contenido:", error);
     res.status(500).json({ error: "No se pudo guardar el contenido" });
