@@ -1,23 +1,12 @@
 import { Router } from "express";
 import multer from "multer";
-import path from "node:path";
-import fs from "node:fs";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 
-const uploadsDir = path.join(process.cwd(), "uploads");
-fs.mkdirSync(uploadsDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
-  },
-});
-
+// En memoria, no en disco — nunca tocamos el sistema de archivos del
+// servidor, que no persiste entre despliegues en este hosting.
 const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB (en base64 pesa ~33% más)
   fileFilter: (req, file, cb) => {
     const allowed = ["image/jpeg", "image/png", "image/webp"];
     if (!allowed.includes(file.mimetype)) {
@@ -29,18 +18,17 @@ const upload = multer({
 
 export const uploadRouter = Router();
 
-uploadRouter.post(
-  "/",
-  requireAdmin,
-  upload.single("image"),
-  (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: "No se recibió ninguna imagen" });
-    }
-
-    // URL absoluta para que el frontend la pueda usar directo en <img src>
-    // sin importar en qué puerto/dominio esté corriendo.
-    const publicUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
-    res.status(201).json({ url: publicUrl });
+uploadRouter.post("/", requireAdmin, upload.single("image"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: "No se recibió ninguna imagen" });
   }
-);
+
+  // Convierte el archivo a un "data URI" — un texto que el navegador
+  // interpreta directo como imagen, sin necesitar ningún archivo real
+  // guardado en ningún servidor. Esto se guarda tal cual en la columna
+  // `image` de MySQL.
+  const base64 = req.file.buffer.toString("base64");
+  const dataUri = `data:${req.file.mimetype};base64,${base64}`;
+
+  res.status(201).json({ url: dataUri });
+});
