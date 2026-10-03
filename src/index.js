@@ -11,60 +11,51 @@ import { uploadRouter } from "./routes/upload.js";
 const app = express();
 
 // --- CORS ---
-// Acepta varios orígenes separados por coma en FRONTEND_URL.
-// Ej: FRONTEND_URL="http://localhost:5173,https://forestgreen-alligator-342469.hostingersite.com"
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
-  .map((o) => o.trim().replace(/\/$/, "")) // quita barra final
+  .map((o) => o.trim().replace(/\/$/, ""))
   .filter(Boolean);
+
+console.log("🌐 Orígenes permitidos:", allowedOrigins);
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Permite peticiones sin Origin (Postman, curl, health checks, SSR)
       if (!origin) return callback(null, true);
-
-      const cleanOrigin = origin.replace(/\/$/, "");
-
-      if (allowedOrigins.includes(cleanOrigin)) {
-        return callback(null, true);
-      }
-
-      console.warn(`❌ CORS bloqueado para origen: ${origin}`);
-      return callback(new Error(`Origen no permitido por CORS: ${origin}`));
+      const clean = origin.replace(/\/$/, "");
+      if (allowedOrigins.includes(clean)) return callback(null, true);
+      console.warn(`❌ CORS bloqueado para: ${origin}`);
+      return callback(null, false);
     },
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-app.use(express.json());
+// Responde a preflight OPTIONS
+app.options("*", cors());
 
-// Sirve las imágenes subidas desde el panel admin
+app.use(express.json());
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", cors: allowedOrigins });
 });
 
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
 
-// Middleware de errores (incluye los de CORS)
 app.use((err, req, res, next) => {
-  if (err.message?.includes("CORS")) {
-    return res.status(403).json({ error: err.message });
-  }
   console.error("Error no manejado:", err);
   res.status(500).json({ error: "Error interno del servidor" });
 });
 
 const PORT = process.env.PORT || 4000;
 
-// Verifica la conexión antes de levantar el servidor
 await testConnection();
 
 app.listen(PORT, () => {
   console.log(`Tanadorada API corriendo en el puerto ${PORT}`);
-  console.log(`Orígenes permitidos: ${allowedOrigins.join(", ") || "(ninguno)"}`);
 });
