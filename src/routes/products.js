@@ -6,6 +6,37 @@ import { slugify } from "../lib/slugify.js";
 
 export const productsRouter = Router();
 
+const MAX_IMAGES = 5;
+
+// El listado NO incluye "images" (la galería): las páginas de catálogo solo
+// muestran la foto principal, y así no cargan 3 fotos por producto.
+const LIST_COLUMNS =
+  "id, title, price, image, badge, category, collection, createdAt";
+
+function cleanImages(images) {
+  if (!Array.isArray(images)) return [];
+  return images
+    .filter((src) => typeof src === "string" && src.length > 0)
+    .slice(0, MAX_IMAGES);
+}
+
+// La galería se guarda como texto JSON; aquí vuelve a ser una lista.
+// Los productos viejos (sin galería) devuelven [image], así el frontend
+// siempre recibe una lista.
+function withGallery(row) {
+  if (!row) return row;
+  let images = [];
+  if (row.images) {
+    try {
+      images = cleanImages(JSON.parse(row.images));
+    } catch {
+      images = [];
+    }
+  }
+  if (images.length === 0 && row.image) images = [row.image];
+  return { ...row, images };
+}
+
 // --- Lectura pública ---
 productsRouter.get("/", async (req, res) => {
   try {
@@ -26,7 +57,7 @@ productsRouter.get("/", async (req, res) => {
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const products = await query(
-      `SELECT * FROM Product ${where} ORDER BY createdAt ASC`,
+      `SELECT ${LIST_COLUMNS} FROM Product ${where} ORDER BY createdAt ASC`,
       params
     );
 
@@ -47,7 +78,7 @@ productsRouter.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Producto no encontrado" });
     }
 
-    res.json(product);
+    res.json(withGallery(product));
   } catch (error) {
     console.error("Error obteniendo producto:", error);
     res.status(500).json({ error: "Error al obtener producto" });
@@ -58,9 +89,13 @@ productsRouter.get("/:id", async (req, res) => {
 
 productsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, badge, category, collection } = req.body;
+    const { title, price, image, images, badge, category, collection } =
+      req.body;
 
-    if (!title || !price || !image) {
+    const gallery = cleanImages(images);
+    const mainImage = gallery[0] || image;
+
+    if (!title || !price || !mainImage) {
       return res.status(400).json({
         error: "Faltan campos: title, price e image son obligatorios",
       });
@@ -76,12 +111,13 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
         Number(price),
-        image,
+        mainImage,
+        gallery.length ? JSON.stringify(gallery) : null,
         badge || null,
         category || null,
         collection || null,
@@ -89,17 +125,17 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     );
 
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [id]);
-    res.status(201).json(product);
+    res.status(201).json(withGallery(product));
   } catch (error) {
     console.error("Error creando producto:", error);
     res.status(500).json({ error: "No se pudo crear el producto" });
   }
 });
 
-// 👇 Esta es la ruta que tenía el bug: le faltaba "collection"
 productsRouter.put("/:id", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, badge, category, collection } = req.body;
+    const { title, price, image, images, badge, category, collection } =
+      req.body;
 
     const existing = await queryOne("SELECT id FROM Product WHERE id = ?", [
       req.params.id,
@@ -113,7 +149,21 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
 
     if (title !== undefined) { fields.push("title = ?"); values.push(title); }
     if (price !== undefined) { fields.push("price = ?"); values.push(Number(price)); }
-    if (image !== undefined) { fields.push("image = ?"); values.push(image); }
+
+    if (images !== undefined) {
+      // Con galería: la primera foto es siempre la principal (image).
+      const gallery = cleanImages(images);
+      fields.push("images = ?");
+      values.push(gallery.length ? JSON.stringify(gallery) : null);
+      if (gallery.length) {
+        fields.push("image = ?");
+        values.push(gallery[0]);
+      }
+    } else if (image !== undefined) {
+      fields.push("image = ?");
+      values.push(image);
+    }
+
     if (badge !== undefined) { fields.push("badge = ?"); values.push(badge || null); }
     if (category !== undefined) { fields.push("category = ?"); values.push(category || null); }
     if (collection !== undefined) { fields.push("collection = ?"); values.push(collection || null); }
@@ -126,7 +176,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
       req.params.id,
     ]);
-    res.json(product);
+    res.json(withGallery(product));
   } catch (error) {
     console.error("Error actualizando producto:", error);
     res.status(500).json({ error: "No se pudo actualizar el producto" });
