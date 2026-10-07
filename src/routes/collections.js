@@ -1,151 +1,86 @@
-// src/routes/products.js
 import { Router } from "express";
 import { query, queryOne } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import { slugify } from "../lib/slugify.js";
 
-export const productsRouter = Router();
+export const collectionsRouter = Router();
 
-// --- Lectura pública ---
-productsRouter.get("/", async (req, res) => {
+// GET /api/collections                    -> todas
+// GET /api/collections?category=anillos   -> solo las de esa categoría
+collectionsRouter.get("/", async (req, res) => {
   try {
-    const { category, collection } = req.query;
+    const { category } = req.query;
 
-    const conditions = [];
-    const params = [];
+    const collections = category
+      ? await query(
+          "SELECT * FROM Collection WHERE category = ? ORDER BY createdAt ASC",
+          [category]
+        )
+      : await query("SELECT * FROM Collection ORDER BY createdAt ASC");
 
-    if (category) {
-      conditions.push("category = ?");
-      params.push(category);
-    }
-    if (collection) {
-      conditions.push("collection = ?");
-      params.push(collection);
-    }
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-
-    const products = await query(
-      `SELECT * FROM Product ${where} ORDER BY createdAt ASC`,
-      params
-    );
-
-    res.json(products);
+    res.json(collections);
   } catch (error) {
-    console.error("Error listando productos:", error);
-    res.status(500).json({ error: "Error al listar productos" });
+    console.error("Error listando colecciones:", error);
+    res.status(500).json({ error: "Error al listar colecciones" });
   }
 });
 
-productsRouter.get("/:id", async (req, res) => {
+// POST /api/collections — crea una colección, siempre ligada a una categoría.
+collectionsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
-      req.params.id,
-    ]);
+    const { name, category } = req.body;
 
-    if (!product) {
-      return res.status(404).json({ error: "Producto no encontrado" });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "El nombre es obligatorio" });
+    }
+    if (!category) {
+      return res.status(400).json({ error: "Debes elegir una categoría" });
     }
 
-    res.json(product);
-  } catch (error) {
-    console.error("Error obteniendo producto:", error);
-    res.status(500).json({ error: "Error al obtener producto" });
-  }
-});
-
-// --- Escritura, protegida con contraseña de admin ---
-
-productsRouter.post("/", requireAdmin, async (req, res) => {
-  try {
-    const { title, price, image, badge, category, collection } = req.body;
-
-    if (!title || !price || !image) {
-      return res.status(400).json({
-        error: "Faltan campos: title, price e image son obligatorios",
-      });
-    }
-
-    const baseId = slugify(title);
+    const baseId = slugify(name);
     let id = baseId;
     let suffix = 1;
 
-    while (await queryOne("SELECT id FROM Product WHERE id = ?", [id])) {
+    while (await queryOne("SELECT id FROM Collection WHERE id = ?", [id])) {
       suffix += 1;
       id = `${baseId}-${suffix}`;
     }
 
-    await query(
-      "INSERT INTO Product (id, title, price, image, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [
-        id,
-        title,
-        Number(price),
-        image,
-        badge || null,
-        category || null,
-        collection || null,
-      ]
-    );
+    await query("INSERT INTO Collection (id, name, category) VALUES (?, ?, ?)", [
+      id,
+      name.trim(),
+      category,
+    ]);
 
-    const product = await queryOne("SELECT * FROM Product WHERE id = ?", [id]);
-    res.status(201).json(product);
+    const collection = await queryOne("SELECT * FROM Collection WHERE id = ?", [
+      id,
+    ]);
+    res.status(201).json(collection);
   } catch (error) {
-    console.error("Error creando producto:", error);
-    res.status(500).json({ error: "No se pudo crear el producto" });
+    console.error("Error creando colección:", error);
+    res.status(500).json({ error: "No se pudo crear la colección" });
   }
 });
 
-// 👇 Esta es la ruta que tenía el bug: le faltaba "collection"
-productsRouter.put("/:id", requireAdmin, async (req, res) => {
+// DELETE /api/collections/:id — borra la colección y limpia la etiqueta
+// de los productos que la tenían asignada (no borra los productos).
+collectionsRouter.delete("/:id", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, badge, category, collection } = req.body;
-
-    const existing = await queryOne("SELECT id FROM Product WHERE id = ?", [
+    await query("UPDATE Product SET collection = NULL WHERE collection = ?", [
       req.params.id,
     ]);
-    if (!existing) {
-      return res.status(404).json({ error: "Producto no encontrado" });
-    }
 
-    const fields = [];
-    const values = [];
-
-    if (title !== undefined) { fields.push("title = ?"); values.push(title); }
-    if (price !== undefined) { fields.push("price = ?"); values.push(Number(price)); }
-    if (image !== undefined) { fields.push("image = ?"); values.push(image); }
-    if (badge !== undefined) { fields.push("badge = ?"); values.push(badge || null); }
-    if (category !== undefined) { fields.push("category = ?"); values.push(category || null); }
-    if (collection !== undefined) { fields.push("collection = ?"); values.push(collection || null); }
-
-    if (fields.length > 0) {
-      values.push(req.params.id);
-      await query(`UPDATE Product SET ${fields.join(", ")} WHERE id = ?`, values);
-    }
-
-    const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
-      req.params.id,
-    ]);
-    res.json(product);
-  } catch (error) {
-    console.error("Error actualizando producto:", error);
-    res.status(500).json({ error: "No se pudo actualizar el producto" });
-  }
-});
-
-productsRouter.delete("/:id", requireAdmin, async (req, res) => {
-  try {
-    const result = await query("DELETE FROM Product WHERE id = ?", [
+    const result = await query("DELETE FROM Collection WHERE id = ?", [
       req.params.id,
     ]);
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Producto no encontrado" });
+      return res.status(404).json({ error: "Colección no encontrada" });
     }
 
     res.status(204).end();
   } catch (error) {
-    console.error("Error eliminando producto:", error);
-    res.status(500).json({ error: "No se pudo eliminar el producto" });
+    console.error("Error eliminando colección:", error);
+    res.status(500).json({ error: "No se pudo eliminar la colección" });
   }
 });
