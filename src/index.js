@@ -8,20 +8,22 @@ import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
 import { uploadRouter } from "./routes/upload.js";
 import { contentRouter } from "./routes/content.js";
-import { requireAdmin } from "./middleware/requireAdmin.js";
 import { collectionsRouter } from "./routes/collections.js";
+import { requireAdmin } from "./middleware/requireAdmin.js";
 import { adminLimiter, orderLimiter } from "./middleware/rateLimiters.js";
 
 const app = express();
+
+// Hostinger pone un proxy delante de tu app. Sin esta línea, los límites de
+// intentos ven a TODAS las personas con la misma IP (la del proxy) y las
+// cuentan juntas. Con "1" lee la IP real de cada visitante.
+app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
   .map((o) => o.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-// Headers de seguridad básicos (X-Content-Type-Options, X-Frame-Options,
-// etc). crossOriginResourcePolicy en "cross-origin" porque servimos
-// imágenes/datos para que el frontend (en otro dominio) los consuma.
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -46,15 +48,13 @@ app.options("*", cors());
 
 app.use(express.json({ limit: "15mb" }));
 
-// Health check PÚBLICO: solo confirma que el servidor responde, sin
-// revelar nada sensible.
+// Health check público: solo confirma que el servidor responde.
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Health check DETALLADO: mismo propósito que antes, pero ahora protegido
-// con la contraseña de admin, para que solo tú puedas ver esos detalles.
-app.get("/api/health/detailed", requireAdmin, async (req, res) => {
+// Health check detallado: protegido con la contraseña de admin.
+app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => {
   const info = {
     status: "ok",
     env: {
@@ -76,25 +76,23 @@ app.get("/api/health/detailed", requireAdmin, async (req, res) => {
   res.json(info);
 });
 
-// Rate limit en todo lo que pida contraseña de admin (login, crear/editar/
-// borrar productos, subir imágenes, editar contenido).
-app.use("/api/products/:id?", (req, res, next) => {
-  if (req.headers["x-admin-password"]) return adminLimiter(req, res, next);
-  next();
-});
+// --- Límites de intentos ---
+const isGet = (req) => req.method === "GET";
+
 app.use("/api/upload", adminLimiter);
-app.use("/api/content/:key?", (req, res, next) => {
-  if (req.method !== "GET") return adminLimiter(req, res, next);
-  next();
-});
+app.use("/api/content", (req, res, next) =>
+  isGet(req) ? next() : adminLimiter(req, res, next)
+);
+app.use("/api/collections", (req, res, next) =>
+  isGet(req) ? next() : adminLimiter(req, res, next)
+);
+app.use("/api/products", (req, res, next) =>
+  req.headers["x-admin-password"] ? adminLimiter(req, res, next) : next()
+);
+app.get("/api/orders", adminLimiter); // listado de pedidos (solo admin)
+app.post("/api/orders", orderLimiter); // crear pedido (público, con tope)
 
 app.use("/api/products", productsRouter);
-app.use("/api/orders/", orderLimiter, (req, res, next) => {
-  // El límite solo aplica a POST (crear orden) — GET de listado/detalle
-  // de una orden se queda libre, no representan riesgo de abuso.
-  if (req.method === "POST" && req.path === "/") return orderLimiter(req, res, next);
-  next();
-});
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
 app.use("/api/content", contentRouter);
