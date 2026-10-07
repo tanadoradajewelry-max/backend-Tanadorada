@@ -7,18 +7,28 @@ import { slugify } from "../lib/slugify.js";
 export const productsRouter = Router();
 
 // --- Lectura pública ---
-// GET /api/products           -> todos los productos
-// GET /api/products?category=anillos -> solo los de esa categoría
 productsRouter.get("/", async (req, res) => {
   try {
-    const { category } = req.query;
+    const { category, collection } = req.query;
 
-    const products = category
-      ? await query(
-          "SELECT * FROM Product WHERE category = ? ORDER BY createdAt ASC",
-          [category]
-        )
-      : await query("SELECT * FROM Product ORDER BY createdAt ASC");
+    const conditions = [];
+    const params = [];
+
+    if (category) {
+      conditions.push("category = ?");
+      params.push(category);
+    }
+    if (collection) {
+      conditions.push("collection = ?");
+      params.push(collection);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const products = await query(
+      `SELECT * FROM Product ${where} ORDER BY createdAt ASC`,
+      params
+    );
 
     res.json(products);
   } catch (error) {
@@ -48,7 +58,7 @@ productsRouter.get("/:id", async (req, res) => {
 
 productsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, badge, category } = req.body;
+    const { title, price, image, badge, category, collection } = req.body;
 
     if (!title || !price || !image) {
       return res.status(400).json({
@@ -66,8 +76,16 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, badge, category) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, title, Number(price), image, badge || null, category || null]
+      "INSERT INTO Product (id, title, price, image, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [
+        id,
+        title,
+        Number(price),
+        image,
+        badge || null,
+        category || null,
+        collection || null,
+      ]
     );
 
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [id]);
@@ -78,9 +96,10 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
   }
 });
 
+// 👇 Esta es la ruta que tenía el bug: le faltaba "collection"
 productsRouter.put("/:id", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, badge, category } = req.body;
+    const { title, price, image, badge, category, collection } = req.body;
 
     const existing = await queryOne("SELECT id FROM Product WHERE id = ?", [
       req.params.id,
@@ -97,6 +116,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     if (image !== undefined) { fields.push("image = ?"); values.push(image); }
     if (badge !== undefined) { fields.push("badge = ?"); values.push(badge || null); }
     if (category !== undefined) { fields.push("category = ?"); values.push(category || null); }
+    if (collection !== undefined) { fields.push("collection = ?"); values.push(collection || null); }
 
     if (fields.length > 0) {
       values.push(req.params.id);
