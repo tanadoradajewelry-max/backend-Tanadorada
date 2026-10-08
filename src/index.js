@@ -14,9 +14,8 @@ import { adminLimiter, orderLimiter } from "./middleware/rateLimiters.js";
 
 const app = express();
 
-// Hostinger pone un proxy delante de tu app. Sin esta línea, los límites de
-// intentos ven a TODAS las personas con la misma IP (la del proxy) y las
-// cuentan juntas. Con "1" lee la IP real de cada visitante.
+// Hostinger pone un proxy delante de tu app. Con esta línea los límites de
+// intentos leen la IP real de cada visitante.
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -51,6 +50,12 @@ app.use(express.json({ limit: "15mb" }));
 // Health check público: solo confirma que el servidor responde.
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// Verificación de la contraseña de admin. La usan el login y el guardia
+// del panel. Éxito = 200, contraseña mala = 401.
+app.get("/api/admin/verify", adminLimiter, requireAdmin, (req, res) => {
+  res.json({ ok: true });
 });
 
 // Health check detallado: protegido con la contraseña de admin.
