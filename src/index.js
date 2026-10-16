@@ -9,8 +9,13 @@ import { ordersRouter } from "./routes/orders.js";
 import { uploadRouter } from "./routes/upload.js";
 import { contentRouter } from "./routes/content.js";
 import { collectionsRouter } from "./routes/collections.js";
+import { charmBarRouter } from "./routes/charmbar.js";
 import { requireAdmin } from "./middleware/requireAdmin.js";
-import { adminLimiter, orderLimiter } from "./middleware/rateLimiters.js";
+import {
+  adminLimiter,
+  orderLimiter,
+  charmBarLimiter,
+} from "./middleware/rateLimiters.js";
 
 const app = express();
 
@@ -96,12 +101,16 @@ app.use("/api/products", (req, res, next) =>
 );
 app.get("/api/orders", adminLimiter); // listado de pedidos (solo admin)
 app.post("/api/orders", orderLimiter); // crear pedido (público, con tope)
+app.post("/api/charm-bar", charmBarLimiter); // solicitud de Charm Bar (pública, con tope)
+app.get("/api/charm-bar", adminLimiter); // lista de solicitudes (solo admin)
+app.put("/api/charm-bar/:id/status", adminLimiter); // cambiar estado (solo admin)
 
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
 app.use("/api/content", contentRouter);
 app.use("/api/collections", collectionsRouter);
+app.use("/api/charm-bar", charmBarRouter);
 
 app.use((err, req, res, next) => {
   console.error("Error no manejado:", err);
