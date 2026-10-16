@@ -21,3 +21,16 @@ export const orderLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Demasiados intentos de compra. Espera unos minutos." },
 });
+
+// Formulario de Charm Bar: público, con tope de 5 solicitudes por hora
+// desde la misma conexión.
+export const charmBarLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error:
+      "Ya enviaste varias solicitudes. Intenta de nuevo en una hora o escríbenos por WhatsApp.",
+  },
+});
