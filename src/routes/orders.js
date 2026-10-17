@@ -4,6 +4,7 @@ import { pool, query, queryOne } from "../lib/db.js";
 import { createHostedPayment, verifyPaymentHash } from "../lib/pixelpay.js";
 import { sendOrderEmails } from "../lib/mailer.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { parseSizes } from "../lib/sizes.js";
 import { randomUUID } from "node:crypto";
 
 export const ordersRouter = Router();
@@ -13,10 +14,9 @@ async function getOrderWithItems(orderId) {
   const order = await queryOne("SELECT * FROM `Order` WHERE id = ?", [orderId]);
   if (!order) return null;
 
-  const items = await query(
-    "SELECT * FROM OrderItem WHERE orderId = ?",
-    [orderId]
-  );
+  const items = await query("SELECT * FROM OrderItem WHERE orderId = ?", [
+    orderId,
+  ]);
   return { ...order, items };
 }
 
@@ -50,97 +50,154 @@ ordersRouter.get("/", requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/orders — crea la orden y el link de pago hospedado
+// POST /api/orders — crea la orden y el link de pago hospedado.
+// El navegador solo manda "qué producto, qué talla y cuántos": el PRECIO se
+// busca aquí en el servidor, nunca se acepta el que venga del navegador.
 ordersRouter.post("/", async (req, res) => {
-  const conn = await pool.getConnection();
   try {
-    const { customer, items } = req.body;
+    const { customer, items } = req.body || {};
 
-    if (!customer?.name || !customer?.email || !items?.length) {
-      conn.release();
+    if (
+      !customer?.name ||
+      !customer?.email ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
       return res.status(400).json({ error: "Faltan datos del pedido" });
     }
 
-    const productIds = items.map((item) => item.productId);
+    if (items.length > 50) {
+      return res
+        .status(400)
+        .json({ error: "El pedido tiene demasiados productos" });
+    }
+
+    // Cantidades: enteros de 1 a 99 (una cantidad negativa bajaría el total).
+    const requested = items.map((item) => ({
+      productId: String(item?.productId ?? ""),
+      quantity: Number(item?.quantity),
+      size: item?.size == null ? null : String(item.size),
+    }));
+
+    for (const item of requested) {
+      if (
+        !item.productId ||
+        !Number.isInteger(item.quantity) ||
+        item.quantity < 1 ||
+        item.quantity > 99
+      ) {
+        return res
+          .status(400)
+          .json({ error: "Hay una cantidad no válida en el pedido" });
+      }
+    }
+
+    // Un mismo producto puede venir en varias tallas: se busca una sola vez.
+    const productIds = [...new Set(requested.map((item) => item.productId))];
     const placeholders = productIds.map(() => "?").join(",");
-    const [dbProducts] = await conn.query(
+    const dbProducts = await query(
       `SELECT * FROM Product WHERE id IN (${placeholders})`,
       productIds
     );
 
     if (dbProducts.length !== productIds.length) {
-      conn.release();
       return res.status(400).json({ error: "Algún producto ya no existe" });
     }
 
-    const orderItems = items.map((item) => {
+    const orderItems = [];
+
+    for (const item of requested) {
       const product = dbProducts.find((p) => p.id === item.productId);
-      return {
+      const sizes = parseSizes(product.sizes);
+
+      let price = product.price;
+      let title = product.title;
+
+      if (sizes.length > 0) {
+        // El producto tiene tallas: la talla es obligatoria y manda el precio.
+        const chosen = sizes.find((s) => s.label === item.size);
+
+        if (!chosen) {
+          return res.status(400).json({
+            error: `Elige una talla válida para ${product.title}`,
+          });
+        }
+
+        price = chosen.price;
+        // La talla queda en el nombre, así se ve en tu panel y en los correos.
+        title = `${product.title} · Talla ${chosen.label}`;
+      }
+
+      orderItems.push({
         productId: product.id,
-        title: product.title,
-        price: product.price,
+        title,
+        price,
         quantity: item.quantity,
-      };
-    });
+      });
+    }
 
     const subtotal = orderItems.reduce(
       (sum, item) => sum + item.price * item.quantity,
       0
     );
 
-    // 🔒 Transacción: crea orden + items juntos
-    await conn.beginTransaction();
-
     const orderId = randomUUID();
 
-    await conn.query(
-      `INSERT INTO \`Order\` 
-        (id, customerName, email, phone, address, city, subtotal, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        orderId,
-        customer.name,
-        customer.email,
-        customer.phone,
-        customer.address,
-        customer.city,
-        subtotal,
-        "pending",
-      ]
-    );
+    // 🔒 Transacción: crea orden + items juntos, o nada.
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
 
-    for (const item of orderItems) {
       await conn.query(
-        `INSERT INTO OrderItem 
-          (id, orderId, productId, title, price, quantity)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO \`Order\`
+          (id, customerName, email, phone, address, city, subtotal, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          randomUUID(),
           orderId,
-          item.productId,
-          item.title,
-          item.price,
-          item.quantity,
+          String(customer.name),
+          String(customer.email),
+          String(customer.phone ?? ""),
+          String(customer.address ?? ""),
+          String(customer.city ?? ""),
+          subtotal,
+          "pending",
         ]
       );
+
+      for (const item of orderItems) {
+        await conn.query(
+          `INSERT INTO OrderItem
+            (id, orderId, productId, title, price, quantity)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            randomUUID(),
+            orderId,
+            item.productId,
+            item.title,
+            item.price,
+            item.quantity,
+          ]
+        );
+      }
+
+      await conn.commit();
+    } catch (error) {
+      await conn.rollback().catch(() => {});
+      throw error;
+    } finally {
+      // Se libera UNA sola vez, pase lo que pase.
+      conn.release();
     }
-
-    await conn.commit();
-    conn.release();
-
-    const order = await getOrderWithItems(orderId);
 
     // Crear link de pago (fuera de la transacción, usa red externa)
     const approveUrl = await createHostedPayment({
-      orderId: order.id,
+      orderId,
       amount: subtotal,
       customer,
     });
 
-    res.status(201).json({ orderId: order.id, approveUrl });
+    res.status(201).json({ orderId, approveUrl });
   } catch (error) {
-    try { await conn.rollback(); } catch {}
-    conn.release();
     console.error("Error creando la orden:", error);
     res.status(500).json({ error: "No se pudo crear la orden" });
   }
