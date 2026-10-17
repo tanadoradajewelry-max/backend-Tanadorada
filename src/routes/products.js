@@ -3,6 +3,7 @@ import { Router } from "express";
 import { query, queryOne } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import { slugify } from "../lib/slugify.js";
+import { cleanSizes, parseSizes, minSizePrice } from "../lib/sizes.js";
 
 export const productsRouter = Router();
 
@@ -10,8 +11,9 @@ const MAX_IMAGES = 5;
 
 // El listado NO incluye "images" (la galería): las páginas de catálogo solo
 // muestran la foto principal, y así no cargan 3 fotos por producto.
+// Sí incluye "sizes" (es texto corto) para poder mostrar "Desde L…".
 const LIST_COLUMNS =
-  "id, title, price, image, badge, category, collection, createdAt";
+  "id, title, price, image, badge, category, collection, sizes, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
@@ -35,6 +37,12 @@ function withGallery(row) {
   }
   if (images.length === 0 && row.image) images = [row.image];
   return { ...row, images };
+}
+
+// Las tallas también vuelven a ser una lista (vacía si no tiene).
+function withSizes(row) {
+  if (!row) return row;
+  return { ...row, sizes: parseSizes(row.sizes) };
 }
 
 // --- Lectura pública ---
@@ -61,7 +69,7 @@ productsRouter.get("/", async (req, res) => {
       params
     );
 
-    res.json(products);
+    res.json(products.map(withSizes));
   } catch (error) {
     console.error("Error listando productos:", error);
     res.status(500).json({ error: "Error al listar productos" });
@@ -78,7 +86,7 @@ productsRouter.get("/:id", async (req, res) => {
       return res.status(404).json({ error: "Producto no encontrado" });
     }
 
-    res.json(withGallery(product));
+    res.json(withSizes(withGallery(product)));
   } catch (error) {
     console.error("Error obteniendo producto:", error);
     res.status(500).json({ error: "Error al obtener producto" });
@@ -89,13 +97,17 @@ productsRouter.get("/:id", async (req, res) => {
 
 productsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, images, badge, category, collection } =
+    const { title, price, image, images, sizes, badge, category, collection } =
       req.body;
 
     const gallery = cleanImages(images);
     const mainImage = gallery[0] || image;
 
-    if (!title || !price || !mainImage) {
+    // Con tallas, el precio del producto es el de la talla más barata.
+    const sizeList = cleanSizes(sizes);
+    const finalPrice = sizeList.length ? minSizePrice(sizeList) : Number(price);
+
+    if (!title || !mainImage || !(finalPrice > 0)) {
       return res.status(400).json({
         error: "Faltan campos: title, price e image son obligatorios",
       });
@@ -111,13 +123,14 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, sizes, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
-        Number(price),
+        finalPrice,
         mainImage,
         gallery.length ? JSON.stringify(gallery) : null,
+        sizeList.length ? JSON.stringify(sizeList) : null,
         badge || null,
         category || null,
         collection || null,
@@ -125,7 +138,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     );
 
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [id]);
-    res.status(201).json(withGallery(product));
+    res.status(201).json(withSizes(withGallery(product)));
   } catch (error) {
     console.error("Error creando producto:", error);
     res.status(500).json({ error: "No se pudo crear el producto" });
@@ -134,7 +147,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
 
 productsRouter.put("/:id", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, images, badge, category, collection } =
+    const { title, price, image, images, sizes, badge, category, collection } =
       req.body;
 
     const existing = await queryOne("SELECT id FROM Product WHERE id = ?", [
@@ -148,7 +161,24 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     const values = [];
 
     if (title !== undefined) { fields.push("title = ?"); values.push(title); }
-    if (price !== undefined) { fields.push("price = ?"); values.push(Number(price)); }
+
+    // Tallas: si vienen en la petición se reemplazan por completo
+    // (una lista vacía las quita todas).
+    const sizeList = sizes !== undefined ? cleanSizes(sizes) : undefined;
+
+    if (sizeList !== undefined) {
+      fields.push("sizes = ?");
+      values.push(sizeList.length ? JSON.stringify(sizeList) : null);
+    }
+
+    if (sizeList?.length) {
+      // Con tallas, el precio del producto es el de la talla más barata.
+      fields.push("price = ?");
+      values.push(minSizePrice(sizeList));
+    } else if (price !== undefined) {
+      fields.push("price = ?");
+      values.push(Number(price));
+    }
 
     if (images !== undefined) {
       // Con galería: la primera foto es siempre la principal (image).
@@ -176,7 +206,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
       req.params.id,
     ]);
-    res.json(withGallery(product));
+    res.json(withSizes(withGallery(product)));
   } catch (error) {
     console.error("Error actualizando producto:", error);
     res.status(500).json({ error: "No se pudo actualizar el producto" });
