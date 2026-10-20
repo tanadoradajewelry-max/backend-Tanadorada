@@ -1,34 +1,83 @@
 import { Router } from "express";
 import multer from "multer";
+import { randomUUID } from "node:crypto";
+import { query, queryOne } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 
-// En memoria, no en disco — nunca tocamos el sistema de archivos del
-// servidor, que no persiste entre despliegues en este hosting.
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB (en base64 pesa ~33% más)
-  fileFilter: (req, file, cb) => {
-    const allowed = ["image/jpeg", "image/png", "image/webp"];
-    if (!allowed.includes(file.mimetype)) {
-      return cb(new Error("Solo se permiten imágenes JPG, PNG o WEBP"));
-    }
-    cb(null, true);
-  },
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 }, // 2 MB
 });
 
-export const uploadRouter = Router();
+// Mira los primeros bytes del archivo. El "mimetype" lo manda el navegador
+// y se puede falsificar; esto no.
+function detectType(buf) {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (
+    buf
+      .subarray(0, 8)
+      .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  )
+    return "image/png";
+  if (
+    buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buf.subarray(8, 12).toString("ascii") === "WEBP"
+  )
+    return "image/webp";
+  return null;
+}
 
-uploadRouter.post("/", requireAdmin, upload.single("image"), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No se recibió ninguna imagen" });
+export const uploadRouter = Router(); // POST: solo admin
+export const imagesRouter = Router(); // GET: público
+
+uploadRouter.post(
+  "/",
+  requireAdmin,
+  upload.single("image"),
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: "No se recibió ninguna imagen" });
+      }
+
+      const mime = detectType(req.file.buffer);
+      if (!mime) {
+        return res
+          .status(400)
+          .json({ error: "Solo se permiten imágenes JPG, PNG o WEBP" });
+      }
+
+      const id = randomUUID();
+      await query("INSERT INTO Image (id, mime, data) VALUES (?, ?, ?)", [
+        id,
+        mime,
+        req.file.buffer,
+      ]);
+
+      const base =
+        process.env.PUBLIC_API_URL || `${req.protocol}://${req.get("host")}`;
+      res.status(201).json({ url: `${base.replace(/\/$/, "")}/api/images/${id}` });
+    } catch (err) {
+      next(err);
+    }
   }
+);
 
-  // Convierte el archivo a un "data URI" — un texto que el navegador
-  // interpreta directo como imagen, sin necesitar ningún archivo real
-  // guardado en ningún servidor. Esto se guarda tal cual en la columna
-  // `image` de MySQL.
-  const base64 = req.file.buffer.toString("base64");
-  const dataUri = `data:${req.file.mimetype};base64,${base64}`;
+imagesRouter.get("/:id", async (req, res, next) => {
+  try {
+    const row = await queryOne("SELECT mime, data FROM Image WHERE id = ?", [
+      String(req.params.id),
+    ]);
+    if (!row) return res.status(404).end();
 
-  res.status(201).json({ url: dataUri });
+    res.set({
+      "Content-Type": row.mime,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.send(row.data);
+  } catch (err) {
+    next(err);
+  }
 });
