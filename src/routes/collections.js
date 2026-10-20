@@ -9,7 +9,9 @@ export const collectionsRouter = Router();
 // GET /api/collections?category=anillos   -> solo las de esa categoría
 collectionsRouter.get("/", async (req, res) => {
   try {
-    const { category } = req.query;
+    // Solo se acepta texto (no objetos ni listas).
+    const category =
+      typeof req.query.category === "string" ? req.query.category : "";
 
     const collections = category
       ? await query(
@@ -28,16 +30,20 @@ collectionsRouter.get("/", async (req, res) => {
 // POST /api/collections — crea una colección, siempre ligada a una categoría.
 collectionsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const { name, category } = req.body;
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const category =
+      typeof req.body?.category === "string" ? req.body.category.trim() : "";
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: "El nombre es obligatorio" });
+    if (!name || name.length > 120) {
+      return res
+        .status(400)
+        .json({ error: "El nombre es obligatorio (máximo 120 caracteres)" });
     }
     if (!category) {
       return res.status(400).json({ error: "Debes elegir una categoría" });
     }
 
-    const baseId = slugify(name);
+    const baseId = slugify(name) || "coleccion";
     let id = baseId;
     let suffix = 1;
 
@@ -48,7 +54,7 @@ collectionsRouter.post("/", requireAdmin, async (req, res) => {
 
     await query("INSERT INTO Collection (id, name, category) VALUES (?, ?, ?)", [
       id,
-      name.trim(),
+      name,
       category,
     ]);
 
@@ -63,16 +69,16 @@ collectionsRouter.post("/", requireAdmin, async (req, res) => {
 });
 
 // DELETE /api/collections/:id — borra la colección y limpia la etiqueta
-// de los productos que la tenían asignada (no borra los productos).
+// de los productos que la tenían (no borra los productos).
 collectionsRouter.delete("/:id", requireAdmin, async (req, res) => {
   try {
+    const id = String(req.params.id);
+
     await query("UPDATE Product SET collection = NULL WHERE collection = ?", [
-      req.params.id,
+      id,
     ]);
 
-    const result = await query("DELETE FROM Collection WHERE id = ?", [
-      req.params.id,
-    ]);
+    const result = await query("DELETE FROM Collection WHERE id = ?", [id]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: "Colección no encontrada" });
