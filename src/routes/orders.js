@@ -9,7 +9,8 @@ import { randomUUID } from "node:crypto";
 
 export const ordersRouter = Router();
 
-// Helper: obtiene una orden con sus items
+const clean = (value, max) => String(value ?? "").trim().slice(0, max);
+
 async function getOrderWithItems(orderId) {
   const order = await queryOne("SELECT * FROM `Order` WHERE id = ?", [orderId]);
   if (!order) return null;
@@ -20,11 +21,11 @@ async function getOrderWithItems(orderId) {
   return { ...order, items };
 }
 
+// GET /api/orders — SOLO ADMIN
 ordersRouter.get("/", requireAdmin, async (req, res) => {
   try {
     const orders = await query("SELECT * FROM `Order` ORDER BY createdAt DESC");
 
-    // Carga los items de todas las órdenes en una sola consulta
     if (orders.length > 0) {
       const ids = orders.map((o) => o.id);
       const placeholders = ids.map(() => "?").join(",");
@@ -51,19 +52,30 @@ ordersRouter.get("/", requireAdmin, async (req, res) => {
 });
 
 // POST /api/orders — crea la orden y el link de pago hospedado.
-// El navegador solo manda "qué producto, qué talla y cuántos": el PRECIO se
-// busca aquí en el servidor, nunca se acepta el que venga del navegador.
+// El PRECIO se busca en el servidor, nunca se acepta el del navegador.
 ordersRouter.post("/", async (req, res) => {
   try {
-    const { customer, items } = req.body || {};
+    const { customer: rawCustomer, items } = req.body || {};
+
+    const customer = {
+      name: clean(rawCustomer?.name, 120),
+      email: clean(rawCustomer?.email, 160),
+      phone: clean(rawCustomer?.phone, 25),
+      address: clean(rawCustomer?.address, 300),
+      city: clean(rawCustomer?.city, 100),
+    };
 
     if (
-      !customer?.name ||
-      !customer?.email ||
+      !customer.name ||
+      !customer.email ||
       !Array.isArray(items) ||
       items.length === 0
     ) {
       return res.status(400).json({ error: "Faltan datos del pedido" });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email)) {
+      return res.status(400).json({ error: "El correo no es válido" });
     }
 
     if (items.length > 50) {
@@ -72,7 +84,6 @@ ordersRouter.post("/", async (req, res) => {
         .json({ error: "El pedido tiene demasiados productos" });
     }
 
-    // Cantidades: enteros de 1 a 99 (una cantidad negativa bajaría el total).
     const requested = items.map((item) => ({
       productId: String(item?.productId ?? ""),
       quantity: Number(item?.quantity),
@@ -92,7 +103,6 @@ ordersRouter.post("/", async (req, res) => {
       }
     }
 
-    // Un mismo producto puede venir en varias tallas: se busca una sola vez.
     const productIds = [...new Set(requested.map((item) => item.productId))];
     const placeholders = productIds.map(() => "?").join(",");
     const dbProducts = await query(
@@ -114,7 +124,6 @@ ordersRouter.post("/", async (req, res) => {
       let title = product.title;
 
       if (sizes.length > 0) {
-        // El producto tiene tallas: la talla es obligatoria y manda el precio.
         const chosen = sizes.find((s) => s.label === item.size);
 
         if (!chosen) {
@@ -124,7 +133,6 @@ ordersRouter.post("/", async (req, res) => {
         }
 
         price = chosen.price;
-        // La talla queda en el nombre, así se ve en tu panel y en los correos.
         title = `${product.title} · Talla ${chosen.label}`;
       }
 
@@ -143,7 +151,7 @@ ordersRouter.post("/", async (req, res) => {
 
     const orderId = randomUUID();
 
-    // 🔒 Transacción: crea orden + items juntos, o nada.
+    // Transacción: crea orden + items juntos, o nada.
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -154,11 +162,11 @@ ordersRouter.post("/", async (req, res) => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           orderId,
-          String(customer.name),
-          String(customer.email),
-          String(customer.phone ?? ""),
-          String(customer.address ?? ""),
-          String(customer.city ?? ""),
+          customer.name,
+          customer.email,
+          customer.phone,
+          customer.address,
+          customer.city,
           subtotal,
           "pending",
         ]
@@ -185,11 +193,9 @@ ordersRouter.post("/", async (req, res) => {
       await conn.rollback().catch(() => {});
       throw error;
     } finally {
-      // Se libera UNA sola vez, pase lo que pase.
       conn.release();
     }
 
-    // Crear link de pago (fuera de la transacción, usa red externa)
     const approveUrl = await createHostedPayment({
       orderId,
       amount: subtotal,
@@ -206,10 +212,11 @@ ordersRouter.post("/", async (req, res) => {
 // POST /api/orders/:id/capture — verifica el paymentHash de PixelPay
 ordersRouter.post("/:id/capture", async (req, res) => {
   try {
-    const { paymentHash } = req.body;
+    const paymentHash =
+      typeof req.body?.paymentHash === "string" ? req.body.paymentHash : "";
 
     const order = await queryOne("SELECT * FROM `Order` WHERE id = ?", [
-      req.params.id,
+      String(req.params.id),
     ]);
 
     if (!order) {
@@ -220,33 +227,39 @@ ordersRouter.post("/:id/capture", async (req, res) => {
       return res.json({ status: "paid", orderId: order.id });
     }
 
-    const isValid = verifyPaymentHash(order.id, paymentHash);
+    // Un hash falso NO escribe nada: nadie puede marcar pedidos ajenos como fallidos.
+    if (!verifyPaymentHash(order.id, paymentHash)) {
+      return res.json({ status: "failed", orderId: order.id });
+    }
 
-    // UPDATE condicional: solo si no está "paid" todavía
+    // UPDATE condicional: solo cambia si todavía no está "paid"
     const [updateResult] = await pool.query(
-      "UPDATE `Order` SET status = ? WHERE id = ? AND status != 'paid'",
-      [isValid ? "paid" : "failed", order.id]
+      "UPDATE `Order` SET status = 'paid' WHERE id = ? AND status != 'paid'",
+      [order.id]
     );
 
-    if (isValid && updateResult.affectedRows > 0) {
+    if (updateResult.affectedRows > 0) {
       const fullOrder = await getOrderWithItems(order.id);
       sendOrderEmails(fullOrder);
     }
 
-    res.json({ status: isValid ? "paid" : "failed", orderId: order.id });
+    res.json({ status: "paid", orderId: order.id });
   } catch (error) {
     console.error("Error verificando el pago:", error);
     res.status(500).json({ error: "No se pudo confirmar el pago" });
   }
 });
 
+// GET /api/orders/:id — público, pero SIN datos personales del cliente.
 ordersRouter.get("/:id", async (req, res) => {
   try {
-    const order = await getOrderWithItems(req.params.id);
+    const order = await getOrderWithItems(String(req.params.id));
     if (!order) {
       return res.status(404).json({ error: "Orden no encontrada" });
     }
-    res.json(order);
+
+    const { id, status, subtotal, items, createdAt } = order;
+    res.json({ id, status, subtotal, items, createdAt });
   } catch (error) {
     console.error("Error obteniendo orden:", error);
     res.status(500).json({ error: "Error al obtener la orden" });
