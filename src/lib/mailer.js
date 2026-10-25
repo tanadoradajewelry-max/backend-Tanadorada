@@ -96,76 +96,17 @@ export async function sendOrderEmails(order) {
   }
 }
 
-// Aviso a la dueña cuando, después de una venta, a uno o más productos les
-// quedan pocas piezas. "alerts": [{ id, title, remaining, oversold }]
-export async function sendLowStockEmail(alerts) {
-  if (!alerts?.length) return;
-
+// Aviso al dueño cuando entra una solicitud de Charm Bar Experience.
+// Al darle "Responder" en el correo, la respuesta va directo al cliente.
+export async function sendCharmBarEmail(request) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn("SMTP no configurado en .env — se omite el aviso de stock bajo");
+    console.warn(
+      "SMTP no configurado en .env — se omite el correo de Charm Bar",
+      request.id
+    );
     return;
   }
 
-  try {
-    const soldOut = alerts.filter((a) => a.remaining === 0);
-
-    const subject =
-      alerts.length === 1
-        ? soldOut.length
-          ? `Agotado: ${oneLine(alerts[0].title)}`
-          : `Stock bajo: ${oneLine(alerts[0].title)} (quedan ${alerts[0].remaining})`
-        : `Stock bajo en ${alerts.length} productos${
-            soldOut.length
-              ? ` (${soldOut.length} ${soldOut.length === 1 ? "agotado" : "agotados"})`
-              : ""
-          }`;
-
-    const rowsHtml = alerts
-      .map((a) => {
-        const status =
-          a.remaining === 0
-            ? '<strong style="color:#B4453D">AGOTADO</strong>'
-            : `Quedan <strong>${a.remaining}</strong>`;
-
-        const note =
-          a.oversold > 0
-            ? `<br><span style="color:#B4453D;font-size:12px">Se vendieron ${a.oversold} más de las que había. Revisa ese pedido.</span>`
-            : "";
-
-        return `<tr>
-          <td style="padding:6px 18px 6px 0">${escapeHtml(a.title)}</td>
-          <td style="padding:6px 0">${status}${note}</td>
-        </tr>`;
-      })
-      .join("");
-
-    // Enlace al panel, si FRONTEND_URL está configurada.
-    const base = (process.env.FRONTEND_URL || "")
-      .split(",")[0]
-      .trim()
-      .replace(/\/$/, "");
-
-    const panelLink = base
-      ? `<p><a href="${escapeHtml(base)}/admin">Abrir el panel</a> para actualizar el stock.</p>`
-      : "<p>Entra al panel, en Productos → Editar, para actualizar el stock.</p>";
-
-    await getTransporter().sendMail({
-      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
-      to: process.env.STORE_NOTIFICATION_EMAIL || process.env.SMTP_USER,
-      subject,
-      html: `
-        <h2>Aviso de stock</h2>
-        <p>Después de la última venta, estos productos tienen pocas piezas:</p>
-        <table style="border-collapse:collapse;font-size:14px">${rowsHtml}</table>
-        ${panelLink}
-      `,
-    });
-  } catch (error) {
-    console.error("No se pudo enviar el aviso de stock bajo:", error);
-  }
-}
-
-  
   const [year, month, day] = request.eventDate.split("-");
 
   const rows = [
@@ -214,3 +155,4 @@ export async function sendLowStockEmail(alerts) {
   } catch (error) {
     console.error("No se pudo enviar el correo de Charm Bar:", error);
   }
+}
