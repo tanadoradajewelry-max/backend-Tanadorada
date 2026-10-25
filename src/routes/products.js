@@ -4,16 +4,18 @@ import { query, queryOne } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import { slugify } from "../lib/slugify.js";
 import { cleanSizes, parseSizes, minSizePrice } from "../lib/sizes.js";
+import { parseStock } from "../lib/stock.js";
 
 export const productsRouter = Router();
 
 const MAX_IMAGES = 5;
+const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
 
 // El listado NO incluye "images" (la galería): las páginas de catálogo solo
 // muestran la foto principal, y así no cargan 3 fotos por producto.
-// Sí incluye "sizes" (es texto corto) para poder mostrar "Desde L…".
+// Sí incluye "sizes" y "stock" (son cortos) para mostrar "Desde" y "Agotado".
 const LIST_COLUMNS =
-  "id, title, price, image, badge, category, collection, sizes, createdAt";
+  "id, title, price, image, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
@@ -97,8 +99,17 @@ productsRouter.get("/:id", async (req, res) => {
 
 productsRouter.post("/", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, images, sizes, badge, category, collection } =
-      req.body;
+    const {
+      title,
+      price,
+      image,
+      images,
+      sizes,
+      stock,
+      badge,
+      category,
+      collection,
+    } = req.body;
 
     const gallery = cleanImages(images);
     const mainImage = gallery[0] || image;
@@ -106,6 +117,12 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     // Con tallas, el precio del producto es el de la talla más barata.
     const sizeList = cleanSizes(sizes);
     const finalPrice = sizeList.length ? minSizePrice(sizeList) : Number(price);
+
+    // Sin stock en la petición = el producto no controla stock.
+    const stockValue = stock === undefined ? null : parseStock(stock);
+    if (stockValue === undefined) {
+      return res.status(400).json({ error: STOCK_ERROR });
+    }
 
     if (!title || !mainImage || !(finalPrice > 0)) {
       return res.status(400).json({
@@ -123,7 +140,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, sizes, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
@@ -131,6 +148,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
         mainImage,
         gallery.length ? JSON.stringify(gallery) : null,
         sizeList.length ? JSON.stringify(sizeList) : null,
+        stockValue,
         badge || null,
         category || null,
         collection || null,
@@ -147,14 +165,33 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
 
 productsRouter.put("/:id", requireAdmin, async (req, res) => {
   try {
-    const { title, price, image, images, sizes, badge, category, collection } =
-      req.body;
+    const {
+      title,
+      price,
+      image,
+      images,
+      sizes,
+      stock,
+      badge,
+      category,
+      collection,
+    } = req.body;
 
     const existing = await queryOne("SELECT id FROM Product WHERE id = ?", [
       req.params.id,
     ]);
     if (!existing) {
       return res.status(404).json({ error: "Producto no encontrado" });
+    }
+
+    // Stock: si viene en la petición se reemplaza (vacío = dejar de
+    // controlarlo); si no viene, no se toca.
+    let stockValue;
+    if (stock !== undefined) {
+      stockValue = parseStock(stock);
+      if (stockValue === undefined) {
+        return res.status(400).json({ error: STOCK_ERROR });
+      }
     }
 
     const fields = [];
@@ -178,6 +215,11 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     } else if (price !== undefined) {
       fields.push("price = ?");
       values.push(Number(price));
+    }
+
+    if (stock !== undefined) {
+      fields.push("stock = ?");
+      values.push(stockValue);
     }
 
     if (images !== undefined) {
