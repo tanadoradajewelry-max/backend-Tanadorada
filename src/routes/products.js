@@ -10,12 +10,13 @@ export const productsRouter = Router();
 
 const MAX_IMAGES = 5;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
 // El listado NO incluye "images" (la galería): las páginas de catálogo solo
-// muestran la foto principal, y así no cargan 3 fotos por producto.
-// Sí incluye "sizes" y "stock" (son cortos) para mostrar "Desde" y "Agotado".
+// muestran la foto principal. Sí incluye "imageCount" (un número chico) para
+// saber qué productos tienen segunda foto, y "sizes" y "stock" (son cortos).
 const LIST_COLUMNS =
-  "id, title, price, image, badge, category, collection, sizes, stock, createdAt";
+  "id, title, price, image, imageCount, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
@@ -75,6 +76,68 @@ productsRouter.get("/", async (req, res) => {
   } catch (error) {
     console.error("Error listando productos:", error);
     res.status(500).json({ error: "Error al listar productos" });
+  }
+});
+
+// GET /api/products/:id/image/:index — una foto del producto como IMAGEN
+// de verdad (no como texto dentro de un JSON). Así el navegador la guarda y
+// no la vuelve a descargar. index 0 = la principal, 1 = la segunda, etc.
+productsRouter.get("/:id/image/:index", async (req, res) => {
+  try {
+    const index = Number(req.params.index);
+
+    if (!Number.isInteger(index) || index < 0 || index >= MAX_IMAGES) {
+      return res.status(404).end();
+    }
+
+    // Se lee solo la columna que hace falta: la galería puede pesar varios MB.
+    const column = index === 0 ? "image" : "images";
+    const row = await queryOne(
+      `SELECT ${column} AS source FROM Product WHERE id = ?`,
+      [req.params.id]
+    );
+
+    if (!row || !row.source) return res.status(404).end();
+
+    let source = row.source;
+
+    if (index > 0) {
+      try {
+        source = cleanImages(JSON.parse(row.source))[index];
+      } catch {
+        source = null;
+      }
+    }
+
+    if (!source) return res.status(404).end();
+
+    // Foto guardada como texto: data:image/jpeg;base64,XXXX
+    if (source.startsWith("data:")) {
+      const marker = source.indexOf(";base64,");
+      const mime = marker > 5 ? source.slice(5, marker) : "";
+
+      // Solo se sirven imágenes: nunca otro tipo de archivo.
+      if (!ALLOWED_IMAGE_TYPES.includes(mime)) return res.status(404).end();
+
+      const buffer = Buffer.from(source.slice(marker + 8), "base64");
+
+      res.set({
+        "Content-Type": mime,
+        // 10 minutos: si cambias la foto en el panel, se actualiza pronto.
+        "Cache-Control": "public, max-age=600",
+      });
+      return res.send(buffer);
+    }
+
+    // Foto guardada como enlace completo (productos muy viejos)
+    if (/^https?:\/\//i.test(source)) {
+      return res.redirect(302, source);
+    }
+
+    return res.status(404).end();
+  } catch (error) {
+    console.error("Error sirviendo la foto del producto:", error);
+    res.status(500).end();
   }
 });
 
@@ -140,13 +203,14 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, imageCount, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
         finalPrice,
         mainImage,
         gallery.length ? JSON.stringify(gallery) : null,
+        Math.max(gallery.length, 1),
         sizeList.length ? JSON.stringify(sizeList) : null,
         stockValue,
         badge || null,
@@ -227,6 +291,8 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       const gallery = cleanImages(images);
       fields.push("images = ?");
       values.push(gallery.length ? JSON.stringify(gallery) : null);
+      fields.push("imageCount = ?");
+      values.push(Math.max(gallery.length, 1));
       if (gallery.length) {
         fields.push("image = ?");
         values.push(gallery[0]);
