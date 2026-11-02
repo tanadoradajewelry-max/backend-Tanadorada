@@ -156,3 +156,103 @@ export async function sendCharmBarEmail(request) {
     console.error("No se pudo enviar el correo de Charm Bar:", error);
   }
 }
+
+// =====================================================================
+// CÓDIGO NUEVO AGREGADO AL FINAL (Según las instrucciones de la imagen)
+// =====================================================================
+
+const lempiras = (amount) =>
+  `L${Number(amount).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} HNL`;
+
+const itemsListHtml = (items) =>
+  items
+    .map(
+      (item) =>
+        `<li>${escapeHtml(item.title)} × ${item.quantity} — ${lempiras(item.price * item.quantity)}</li>`
+    )
+    .join("");
+
+// Aviso a la dueña: entró un pedido nuevo que espera el link de pago por
+// WhatsApp. El pedido ya quedó guardado; si el correo falla, solo se registra.
+export async function sendOrderRequestEmail(order) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn(
+      "SMTP no configurado en .env — se omite el aviso de pedido nuevo",
+      order.id
+    );
+    return;
+  }
+
+  try {
+    const shortId = order.id.slice(-8).toUpperCase();
+
+    // Enlace directo al WhatsApp del cliente (8 dígitos = Honduras, +504).
+    const digits = String(order.phone || "").replace(/\D/g, "");
+    const waNumber = digits.length === 8 ? `504${digits}` : digits;
+    const phoneHtml = waNumber
+      ? `<a href="https://wa.me/${waNumber}">${escapeHtml(order.phone)}</a>`
+      : escapeHtml(order.phone);
+
+    const base = (process.env.FRONTEND_URL || "")
+      .split(",")[0]
+      .trim()
+      .replace(/\/$/, "");
+    const panelLink = base
+      ? `<p><a href="${escapeHtml(base)}/admin/pedidos">Abrir los pedidos en el panel</a></p>`
+      : "";
+
+    await getTransporter().sendMail({
+      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
+      to: process.env.STORE_NOTIFICATION_EMAIL || process.env.SMTP_USER,
+      replyTo: order.email,
+      subject: `Nuevo pedido #${shortId} — ${oneLine(order.customerName)} (espera link de pago)`,
+      html: `
+        <h2>Nuevo pedido #${shortId}</h2>
+        <p>El cliente fue enviado a WhatsApp para pedirte el link de pago con tarjeta.
+        Cuando te pague, márcalo como <strong>Pagado</strong> en el panel: se descuenta
+        el stock y recibe su confirmación.</p>
+        <p><strong>Cliente:</strong> ${escapeHtml(order.customerName)} (${escapeHtml(order.email)})</p>
+        <p><strong>WhatsApp / teléfono:</strong> ${phoneHtml}</p>
+        <p><strong>Dirección:</strong> ${escapeHtml(order.address)}, ${escapeHtml(order.city)}</p>
+        <ul>${itemsListHtml(order.items)}</ul>
+        <p><strong>Total:</strong> ${lempiras(order.subtotal)}</p>
+        ${panelLink}
+      `,
+    });
+  } catch (error) {
+    console.error("No se pudo enviar el aviso de pedido nuevo:", error);
+  }
+}
+
+// Confirmación al cliente cuando marcas su pedido como pagado.
+export async function sendPaymentConfirmedEmail(order) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn(
+      "SMTP no configurado en .env — se omite la confirmación de pago",
+      order.id
+    );
+    return;
+  }
+
+  try {
+    const shortId = order.id.slice(-8).toUpperCase();
+
+    await getTransporter().sendMail({
+      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
+      to: order.email,
+      subject: `Recibimos tu pago — pedido #${shortId} — TANADORADA`,
+      html: `
+        <h2>¡Gracias por tu compra, ${escapeHtml(order.customerName)}!</h2>
+        <p>Confirmamos tu pago. Este es el detalle de tu pedido #${shortId}:</p>
+        <ul>${itemsListHtml(order.items)}</ul>
+        <p><strong>Total pagado:</strong> ${lempiras(order.subtotal)}</p>
+        <p>Te vamos a contactar pronto para coordinar el envío.</p>
+      `,
+    });
+  } catch (error) {
+    console.error("No se pudo enviar la confirmación de pago:", error);
+  }
+}
