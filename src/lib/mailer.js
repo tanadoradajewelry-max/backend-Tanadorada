@@ -42,10 +42,6 @@ function buildItemsHtml(items) {
 }
 
 // Se llama una sola vez, justo después de que un pago se confirma.
-// Manda dos correos: uno al dueño de la tienda (notificación de venta)
-// y otro al cliente (confirmación/recibo). Si el SMTP no está configurado
-// o algún envío falla, solo se registra en consola — NUNCA debe tumbar
-// el flujo de la orden, que ya se cobró y guardó correctamente.
 export async function sendOrderEmails(order) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -97,7 +93,6 @@ export async function sendOrderEmails(order) {
 }
 
 // Aviso al dueño cuando entra una solicitud de Charm Bar Experience.
-// Al darle "Responder" en el correo, la respuesta va directo al cliente.
 export async function sendCharmBarEmail(request) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -158,7 +153,36 @@ export async function sendCharmBarEmail(request) {
 }
 
 // =====================================================================
-// CÓDIGO NUEVO AGREGADO AL FINAL (Según las instrucciones de la imagen)
+// FUNCIÓN FALTANTE QUE CAUSABA EL ERROR: Aviso de bajo stock
+// =====================================================================
+export async function sendLowStockEmail(product) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn(
+      "SMTP no configurado en .env — se omite el aviso de bajo stock",
+      product.id
+    );
+    return;
+  }
+
+  try {
+    await getTransporter().sendMail({
+      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
+      to: process.env.STORE_NOTIFICATION_EMAIL || process.env.SMTP_USER,
+      subject: `⚠️ Bajo stock: ${oneLine(product.name)}`,
+      html: `
+        <h2>Aviso de bajo stock</h2>
+        <p>El producto <strong>${escapeHtml(product.name)}</strong> se está agotando.</p>
+        <p><strong>Stock actual:</strong> ${product.stock} unidades.</p>
+        <p>Entra al panel de administración para reabastecerlo.</p>
+      `,
+    });
+  } catch (error) {
+    console.error("No se pudo enviar el correo de bajo stock:", error);
+  }
+}
+
+// =====================================================================
+// CÓDIGO NUEVO (Pedidos por WhatsApp y Confirmación de Pago)
 // =====================================================================
 
 const lempiras = (amount) =>
@@ -175,8 +199,7 @@ const itemsListHtml = (items) =>
     )
     .join("");
 
-// Aviso a la dueña: entró un pedido nuevo que espera el link de pago por
-// WhatsApp. El pedido ya quedó guardado; si el correo falla, solo se registra.
+// Aviso a la dueña: entró un pedido nuevo que espera el link de pago por WhatsApp.
 export async function sendOrderRequestEmail(order) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -189,7 +212,6 @@ export async function sendOrderRequestEmail(order) {
   try {
     const shortId = order.id.slice(-8).toUpperCase();
 
-    // Enlace directo al WhatsApp del cliente (8 dígitos = Honduras, +504).
     const digits = String(order.phone || "").replace(/\D/g, "");
     const waNumber = digits.length === 8 ? `504${digits}` : digits;
     const phoneHtml = waNumber
