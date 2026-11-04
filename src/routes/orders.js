@@ -16,20 +16,12 @@ export const ordersRouter = Router();
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Estados de un pedido:
-//   pending   = espera que la clienta pague con el link de WhatsApp
-//   paid      = pagado (ya se descontó el stock)
-//   cancelled = cancelado
-//   failed    = pedidos viejos del sistema de pago anterior
-// Para cada estado nuevo: desde cuáles se puede llegar. Un pedido pagado
-// ya no se puede cambiar, porque su stock ya se descontó.
 const ALLOWED_FROM = {
   paid: ["pending", "failed", "cancelled"],
   cancelled: ["pending", "failed"],
   pending: ["cancelled", "failed"],
 };
 
-// Helper: obtiene una orden con sus items
 async function getOrderWithItems(orderId) {
   const order = await queryOne("SELECT * FROM `Order` WHERE id = ?", [orderId]);
   if (!order) return null;
@@ -44,7 +36,6 @@ ordersRouter.get("/", requireAdmin, async (req, res) => {
   try {
     const orders = await query("SELECT * FROM `Order` ORDER BY createdAt DESC");
 
-    // Carga los items de todas las órdenes en una sola consulta
     if (orders.length > 0) {
       const ids = orders.map((o) => o.id);
       const placeholders = ids.map(() => "?").join(",");
@@ -70,10 +61,6 @@ ordersRouter.get("/", requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/orders — guarda el pedido y devuelve el link de WhatsApp con el
-// mensaje ya escrito. El navegador solo manda "qué producto, qué talla y
-// cuántos": el PRECIO se busca aquí en el servidor, nunca el que venga del
-// navegador.
 ordersRouter.post("/", async (req, res) => {
   try {
     const { customer, items } = req.body || {};
@@ -105,8 +92,6 @@ ordersRouter.post("/", async (req, res) => {
         .json({ error: "El pedido tiene demasiados productos" });
     }
 
-    // Sin número de WhatsApp guardado en el panel no se crea ningún pedido:
-    // nadie podría atenderlo.
     const whatsapp = await getWhatsappSettings();
     if (!whatsapp) {
       return res.status(503).json({
@@ -115,7 +100,6 @@ ordersRouter.post("/", async (req, res) => {
       });
     }
 
-    // Cantidades: enteros de 1 a 99 (una cantidad negativa bajaría el total).
     const requested = items.map((item) => ({
       productId: String(item?.productId ?? ""),
       quantity: Number(item?.quantity),
@@ -135,7 +119,6 @@ ordersRouter.post("/", async (req, res) => {
       }
     }
 
-    // Un mismo producto puede venir en varias tallas: se busca una sola vez.
     const productIds = [...new Set(requested.map((item) => item.productId))];
     const placeholders = productIds.map(() => "?").join(",");
     const dbProducts = await query(
@@ -147,8 +130,6 @@ ordersRouter.post("/", async (req, res) => {
       return res.status(400).json({ error: "Algún producto ya no existe" });
     }
 
-    // Stock: se revisa por producto (todas las tallas suman) antes de guardar.
-    // Los productos sin stock cargado (null) no se revisan.
     const wanted = new Map();
     for (const item of requested) {
       wanted.set(
@@ -186,7 +167,6 @@ ordersRouter.post("/", async (req, res) => {
       let title = product.title;
 
       if (sizes.length > 0) {
-        // El producto tiene tallas: la talla es obligatoria y manda el precio.
         const chosen = sizes.find((s) => s.label === item.size);
 
         if (!chosen) {
@@ -196,7 +176,6 @@ ordersRouter.post("/", async (req, res) => {
         }
 
         price = chosen.price;
-        // La talla queda en el nombre, así se ve en tu panel y en los correos.
         title = `${product.title} · Talla ${chosen.label}`;
       }
 
@@ -208,18 +187,39 @@ ordersRouter.post("/", async (req, res) => {
       });
     }
 
-    const subtotal = orderItems.reduce(
+    const subtotalOriginal = orderItems.reduce(
       (sum, item) => sum + item.price * item.quantity,
       0
     );
 
+    // =====================================================================
+    // 👇 LÓGICA DEL DESCUENTO DEL 10% EN LA PRIMERA COMPRA 👇
+    // =====================================================================
+    
+    // Revisa si ya existe un pedido previo con este correo O este teléfono
+    const previousOrders = await query(
+      "SELECT id FROM `Order` WHERE email = ? OR phone = ? LIMIT 1",
+      [buyer.email, buyer.phone]
+    );
+    
+    const isFirstPurchase = previousOrders.length === 0;
+    let descuento = 0;
+
+    if (isFirstPurchase) {
+      descuento = subtotalOriginal * 0.10;
+    }
+
+    const subtotalFinal = subtotalOriginal - descuento;
+
+    // =====================================================================
+
     const orderId = randomUUID();
 
-    // 🔒 Transacción: crea orden + items juntos, o nada.
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
 
+      // Se guarda en la base de datos el subtotalFinal (con descuento)
       await conn.query(
         `INSERT INTO \`Order\`
           (id, customerName, email, phone, address, city, subtotal, status)
@@ -231,7 +231,7 @@ ordersRouter.post("/", async (req, res) => {
           buyer.phone,
           buyer.address,
           buyer.city,
-          subtotal,
+          subtotalFinal, // 👈 Total final
           "pending",
         ]
       );
@@ -257,19 +257,19 @@ ordersRouter.post("/", async (req, res) => {
       await conn.rollback().catch(() => {});
       throw error;
     } finally {
-      // Se libera UNA sola vez, pase lo que pase.
       conn.release();
     }
 
+    // Se genera el mensaje de WhatsApp con el subtotal final (con descuento)
     const whatsappUrl = buildWhatsappUrl({
       settings: whatsapp,
       orderId,
       customerName: buyer.name,
       items: orderItems,
-      subtotal,
+      subtotal: subtotalFinal, // 👈 Total final
     });
 
-    // Aviso por correo a la dueña. No se espera: el pedido ya quedó guardado.
+    // El correo que te llega a ti también muestra el total final
     sendOrderRequestEmail({
       id: orderId,
       customerName: buyer.name,
@@ -277,7 +277,7 @@ ordersRouter.post("/", async (req, res) => {
       phone: buyer.phone,
       address: buyer.address,
       city: buyer.city,
-      subtotal,
+      subtotal: subtotalFinal, // 👈 Total final
       items: orderItems,
     });
 
@@ -288,9 +288,6 @@ ordersRouter.post("/", async (req, res) => {
   }
 });
 
-// PUT /api/orders/:id/status — SOLO ADMIN: cambia el estado de un pedido.
-// Al marcarlo como "paid": se descuenta el stock, la clienta recibe su
-// confirmación y, si queda poco stock, te llega el aviso.
 ordersRouter.put("/:id/status", requireAdmin, async (req, res) => {
   try {
     const { status } = req.body || {};
@@ -311,8 +308,6 @@ ordersRouter.put("/:id/status", requireAdmin, async (req, res) => {
       return res.json({ status });
     }
 
-    // UPDATE condicional: si dos clics llegan al mismo tiempo, solo UNO gana
-    // (affectedRows > 0). Así el stock y los correos se procesan una sola vez.
     const allowedFrom = ALLOWED_FROM[status];
     const [result] = await pool.query(
       `UPDATE \`Order\` SET status = ? WHERE id = ? AND status IN (${allowedFrom
@@ -329,8 +324,6 @@ ordersRouter.put("/:id/status", requireAdmin, async (req, res) => {
     }
 
     if (status === "paid") {
-      // El estado ya quedó guardado: si falla el descuento de stock, se
-      // registra en el log pero nunca se deshace el cambio.
       let stockAlerts = [];
       try {
         stockAlerts = await decreaseStockForOrder(order.id);
