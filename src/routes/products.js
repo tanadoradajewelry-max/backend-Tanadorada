@@ -9,12 +9,14 @@ import { parseStock } from "../lib/stock.js";
 export const productsRouter = Router();
 
 const MAX_IMAGES = 5;
+const MAX_DESCRIPTION = 600;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-// El listado NO incluye "images" (la galería): las páginas de catálogo solo
-// muestran la foto principal. Sí incluye "imageCount" (un número chico) para
-// saber qué productos tienen segunda foto, y "sizes" y "stock" (son cortos).
+// El listado NO incluye "images" (la galería) ni "description": las páginas
+// de catálogo solo muestran la foto principal y el precio. Sí incluye
+// "imageCount" (un número chico) para saber qué productos tienen segunda
+// foto, y "sizes" y "stock" (son cortos).
 const LIST_COLUMNS =
   "id, title, price, image, imageCount, badge, category, collection, sizes, stock, createdAt";
 
@@ -23,6 +25,16 @@ function cleanImages(images) {
   return images
     .filter((src) => typeof src === "string" && src.length > 0)
     .slice(0, MAX_IMAGES);
+}
+
+// Minidescripción: texto sin espacios de más y con un largo máximo.
+// Vacía = el producto no muestra descripción.
+function cleanDescription(value) {
+  const text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim()
+    .slice(0, MAX_DESCRIPTION);
+  return text || null;
 }
 
 // La galería se guarda como texto JSON; aquí vuelve a ser una lista.
@@ -169,6 +181,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
+      description,
       badge,
       category,
       collection,
@@ -203,7 +216,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, imageCount, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, imageCount, sizes, stock, description, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
@@ -213,6 +226,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
         Math.max(gallery.length, 1),
         sizeList.length ? JSON.stringify(sizeList) : null,
         stockValue,
+        cleanDescription(description),
         badge || null,
         category || null,
         collection || null,
@@ -236,6 +250,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
+      description,
       badge,
       category,
       collection,
@@ -284,6 +299,12 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     if (stock !== undefined) {
       fields.push("stock = ?");
       values.push(stockValue);
+    }
+
+    // Minidescripción: si viene en la petición se reemplaza (vacía = se quita).
+    if (description !== undefined) {
+      fields.push("description = ?");
+      values.push(cleanDescription(description));
     }
 
     if (images !== undefined) {
