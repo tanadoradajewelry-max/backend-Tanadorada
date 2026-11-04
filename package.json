@@ -4,19 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-   "seed-content": "node src/seed-content.js",
+    "seed-content": "node src/seed-content.js",
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
     "seed": "node src/seed.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "helmet": "^8.0.0",
-    "express-rate-limit": "^7.4.1",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
-    "multer": "^1.4.5-lts.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "multer": "^2.0.2",
     "mysql2": "^3.11.3",
-    "nodemailer": "^6.9.15"
+    "nodemailer": "^10.3.1",
+    "proxy-addr": "^2.0.8"
   }
 }
