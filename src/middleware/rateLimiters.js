@@ -34,3 +34,15 @@ export const charmBarLimiter = rateLimit({
       "Ya enviaste varias solicitudes. Intenta de nuevo en una hora o escríbenos por WhatsApp.",
   },
 });
+
+// Formulario de certificados de regalo: igual, 5 solicitudes por hora.
+export const giftCertificateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error:
+      "Ya enviaste varias solicitudes. Intenta de nuevo en una hora o escríbenos por WhatsApp.",
+  },
+});
