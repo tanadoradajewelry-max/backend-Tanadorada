@@ -3,6 +3,14 @@ import { queryOne } from "./db.js";
 export const DEFAULT_INTRO =
   "Hola Tanadorada 👋 Quiero pagar mi pedido con tarjeta. ¿Me pueden enviar el link de pago, por favor?";
 
+const GIFT_INTRO =
+  "Hola Tanadorada 👋 Quiero comprar un certificado de regalo y pagarlo con tarjeta. ¿Me pueden enviar el link de pago, por favor?";
+
+const GIFT_DELIVERY_TEXT = {
+  personal: "Lo recibo yo para entregarlo personalmente",
+  direct: "Que se envíe directamente al destinatario",
+};
+
 const MAX_INTRO = 300;
 const MAX_LINES = 15; // líneas de productos en el mensaje (el resto se resume)
 
@@ -76,6 +84,28 @@ export function buildWhatsappUrl({
     "",
     `Total: ${money(subtotal)} HNL`,
     `Nombre: ${name}`,
+  ].join("\n");
+
+  return `https://wa.me/${settings.number}?text=${encodeURIComponent(text)}`;
+}
+
+// Link de WhatsApp para pedir el link de pago de un certificado de regalo.
+export function buildGiftCertificateWhatsappUrl({
+  settings,
+  requestId,
+  amount,
+  recipientName,
+  senderName,
+  delivery,
+}) {
+  const text = [
+    GIFT_INTRO,
+    "",
+    `Certificado de regalo #${requestId.slice(-8).toUpperCase()}`,
+    `Monto: ${money(amount)} HNL`,
+    `Para: ${recipientName}`,
+    `De: ${senderName}`,
+    `Entrega: ${GIFT_DELIVERY_TEXT[delivery] ?? delivery}`,
   ].join("\n");
 
   return `https://wa.me/${settings.number}?text=${encodeURIComponent(text)}`;
