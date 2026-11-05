@@ -42,6 +42,10 @@ function buildItemsHtml(items) {
 }
 
 // Se llama una sola vez, justo después de que un pago se confirma.
+// Manda dos correos: uno al dueño de la tienda (notificación de venta)
+// y otro al cliente (confirmación/recibo). Si el SMTP no está configurado
+// o algún envío falla, solo se registra en consola — NUNCA debe tumbar
+// el flujo de la orden, que ya se cobró y guardó correctamente.
 export async function sendOrderEmails(order) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -93,6 +97,7 @@ export async function sendOrderEmails(order) {
 }
 
 // Aviso al dueño cuando entra una solicitud de Charm Bar Experience.
+// Al darle "Responder" en el correo, la respuesta va directo al cliente.
 export async function sendCharmBarEmail(request) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -153,36 +158,7 @@ export async function sendCharmBarEmail(request) {
 }
 
 // =====================================================================
-// FUNCIÓN FALTANTE QUE CAUSABA EL ERROR: Aviso de bajo stock
-// =====================================================================
-export async function sendLowStockEmail(product) {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn(
-      "SMTP no configurado en .env — se omite el aviso de bajo stock",
-      product.id
-    );
-    return;
-  }
-
-  try {
-    await getTransporter().sendMail({
-      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
-      to: process.env.STORE_NOTIFICATION_EMAIL || process.env.SMTP_USER,
-      subject: `⚠️ Bajo stock: ${oneLine(product.name)}`,
-      html: `
-        <h2>Aviso de bajo stock</h2>
-        <p>El producto <strong>${escapeHtml(product.name)}</strong> se está agotando.</p>
-        <p><strong>Stock actual:</strong> ${product.stock} unidades.</p>
-        <p>Entra al panel de administración para reabastecerlo.</p>
-      `,
-    });
-  } catch (error) {
-    console.error("No se pudo enviar el correo de bajo stock:", error);
-  }
-}
-
-// =====================================================================
-// CÓDIGO NUEVO (Pedidos por WhatsApp y Confirmación de Pago)
+// CÓDIGO DE PEDIDOS POR WHATSAPP Y CERTIFICADOS
 // =====================================================================
 
 const lempiras = (amount) =>
@@ -199,7 +175,8 @@ const itemsListHtml = (items) =>
     )
     .join("");
 
-// Aviso a la dueña: entró un pedido nuevo que espera el link de pago por WhatsApp.
+// Aviso a la dueña: entró un pedido nuevo que espera el link de pago por
+// WhatsApp. El pedido ya quedó guardado; si el correo falla, solo se registra.
 export async function sendOrderRequestEmail(order) {
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.warn(
@@ -212,6 +189,7 @@ export async function sendOrderRequestEmail(order) {
   try {
     const shortId = order.id.slice(-8).toUpperCase();
 
+    // Enlace directo al WhatsApp del cliente (8 dígitos = Honduras, +504).
     const digits = String(order.phone || "").replace(/\D/g, "");
     const waNumber = digits.length === 8 ? `504${digits}` : digits;
     const phoneHtml = waNumber
@@ -276,5 +254,90 @@ export async function sendPaymentConfirmedEmail(order) {
     });
   } catch (error) {
     console.error("No se pudo enviar la confirmación de pago:", error);
+  }
+}
+
+// =====================================================================
+// NUEVA FUNCIÓN AGREGADA: CERTIFICADO DE REGALO
+// =====================================================================
+
+// Aviso a la dueña cuando entra una solicitud de certificado de regalo.
+// Si la clienta eligió recibirlo por correo, "Responder" va directo a ella.
+export async function sendGiftCertificateEmail(request) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn(
+      "SMTP no configurado en .env — se omite el correo del certificado",
+      request.id
+    );
+    return;
+  }
+
+  try {
+    const code = request.id.slice(-8).toUpperCase();
+    const isEmail = request.receiveVia === "email";
+
+    const deliveryText =
+      request.delivery === "direct"
+        ? "Que se envíe directamente al destinatario (pedirle sus datos por el chat)"
+        : "Lo recibe quien compra, para entregarlo personalmente";
+
+    // El contacto va como enlace: correo o WhatsApp (8 dígitos = Honduras, +504)
+    let contactHtml;
+    if (isEmail) {
+      contactHtml = `<a href="mailto:${escapeHtml(request.contact)}">${escapeHtml(request.contact)}</a>`;
+    } else {
+      const digits = String(request.contact || "").replace(/\D/g, "");
+      const waNumber = digits.length === 8 ? `504${digits}` : digits;
+      contactHtml = waNumber
+        ? `<a href="https://wa.me/${waNumber}">${escapeHtml(request.contact)}</a>`
+        : escapeHtml(request.contact);
+    }
+
+    const textRows = [
+      ["Monto", lempiras(request.amount)],
+      ["Para", request.recipientName],
+      ["De parte de", request.senderName],
+      ["Mensaje personalizado", request.message],
+      ["Modalidad de entrega", deliveryText],
+      ["Recibirlo por", isEmail ? "Correo electrónico" : "WhatsApp"],
+    ];
+
+    const cell = (label, valueHtml) =>
+      `<tr>
+        <td style="padding:6px 14px 6px 0;color:#777;vertical-align:top"><strong>${escapeHtml(label)}</strong></td>
+        <td style="padding:6px 0">${valueHtml}</td>
+      </tr>`;
+
+    const rowsHtml =
+      textRows
+        .filter(([, value]) => value)
+        .map(([label, value]) =>
+          cell(label, escapeHtml(value).replace(/\n/g, "<br>"))
+        )
+        .join("") + cell("Contacto", contactHtml);
+
+    const base = (process.env.FRONTEND_URL || "")
+      .split(",")[0]
+      .trim()
+      .replace(/\/$/, "");
+    const panelLink = base
+      ? `<p><a href="${escapeHtml(base)}/admin/certificados">Abrir los certificados en el panel</a></p>`
+      : "";
+
+    await getTransporter().sendMail({
+      from: `"TANADORADA" <${process.env.SMTP_USER}>`,
+      to: process.env.STORE_NOTIFICATION_EMAIL || process.env.SMTP_USER,
+      ...(isEmail ? { replyTo: request.contact } : {}),
+      subject: `Certificado de regalo #${code} — ${lempiras(request.amount)} — ${oneLine(request.senderName)}`,
+      html: `
+        <h2>Nueva solicitud de certificado de regalo #${code}</h2>
+        <p>La clienta fue enviada a WhatsApp para pedirte el link de pago con tarjeta.
+        Cuando te pague, cámbiala a <strong>Pagada</strong> en el panel.</p>
+        <table style="border-collapse:collapse;font-size:14px">${rowsHtml}</table>
+        ${panelLink}
+      `,
+    });
+  } catch (error) {
+    console.error("No se pudo enviar el correo del certificado:", error);
   }
 }
