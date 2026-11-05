@@ -3,10 +3,11 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { pool } from "./lib/db.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
-import { uploadRouter } from "./routes/upload.js";
+import { uploadRouter, imagesRouter } from "./routes/upload.js";
 import { contentRouter } from "./routes/content.js";
 import { collectionsRouter } from "./routes/collections.js";
 import { charmBarRouter } from "./routes/charmbar.js";
@@ -21,14 +22,15 @@ import {
 
 const app = express();
 
-// Hostinger pone un proxy delante de tu app. Con esta línea los límites de
-// intentos leen la IP real de cada visitante.
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
   .split(",")
-  .map((o) => o.trim().replace(/\/$/, ""))
+  .map((o) => o.trim().replace(/\/$/, "")) // Quita barras al final
   .filter(Boolean);
+
+// 🔍 DEBUG: Si reinicias el servidor, esto te dirá qué dominios tiene permitidos
+console.log("✅ Orígenes permitidos (CORS):", allowedOrigins);
 
 app.use(
   helmet({
@@ -40,8 +42,15 @@ app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
+      
       const clean = origin.replace(/\/$/, "");
-      if (allowedOrigins.includes(clean)) return callback(null, true);
+      
+      if (allowedOrigins.includes(clean)) {
+        return callback(null, true);
+      }
+      
+      // 🚨 ERROR: Esto te avisará en consola si un dominio intenta entrar y no está permitido
+      console.error(`🚨 CORS bloqueado para el origen: ${origin}. Orígenes válidos:`, allowedOrigins);
       return callback(null, false);
     },
     credentials: true,
@@ -50,22 +59,27 @@ app.use(
   })
 );
 
-app.options("*", cors());
+// Manejo explícito de preflight (Opcional, pero ayuda en algunos hostings)
+app.options(/.*/, cors());
 
 app.use(express.json({ limit: "15mb" }));
 
-// Health check público: solo confirma que el servidor responde.
+const orderLookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiados intentos. Espera unos minutos." },
+});
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Verificación de la contraseña de admin. La usan el login y el guardia
-// del panel. Éxito = 200, contraseña mala = 401.
 app.get("/api/admin/verify", adminLimiter, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// Health check detallado: protegido con la contraseña de admin.
 app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => {
   const info = {
     status: "ok",
@@ -73,7 +87,7 @@ app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => 
       hasDatabaseUrl: !!process.env.DATABASE_URL,
       port: process.env.PORT,
     },
-    cors: allowedOrigins,
+    cors: allowedOrigins, 
     db: null,
   };
   try {
@@ -83,12 +97,13 @@ app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => 
     info.db = { connected: true, result: rows };
   } catch (err) {
     info.status = "degraded";
-    info.db = { connected: false, error: err.message, code: err.code };
+    info.db = { connected: false, code: err.code };
   }
   res.json(info);
 });
 
-// --- Límites de intentos ---
+app.get("/api/my-ip", (req, res) => res.json({ ip: req.ip }));
+
 const isGet = (req) => req.method === "GET";
 
 app.use("/api/upload", adminLimiter);
@@ -101,25 +116,40 @@ app.use("/api/collections", (req, res, next) =>
 app.use("/api/products", (req, res, next) =>
   req.headers["x-admin-password"] ? adminLimiter(req, res, next) : next()
 );
-app.get("/api/orders", adminLimiter); // listado de pedidos (solo admin)
-app.post("/api/orders", orderLimiter); // crear pedido (público, con tope)
-app.put("/api/orders/:id/status", adminLimiter); // cambiar estado de un pedido (solo admin)
-app.post("/api/charm-bar", charmBarLimiter); // solicitud de Charm Bar (pública, con tope)
-app.get("/api/charm-bar", adminLimiter); // lista de solicitudes (solo admin)
-app.put("/api/charm-bar/:id/status", adminLimiter); // cambiar estado (solo admin)
-app.post("/api/gift-certificates", giftCertificateLimiter); // solicitud de certificado (pública, con tope)
-app.get("/api/gift-certificates", adminLimiter); // lista de certificados (solo admin)
-app.put("/api/gift-certificates/:id/status", adminLimiter); // cambiar estado (solo admin)
+
+app.get("/api/orders", adminLimiter);
+app.post("/api/orders", orderLimiter);
+app.put("/api/orders/:id/status", adminLimiter);
+app.post("/api/orders/:id/capture", orderLookupLimiter);
+app.get("/api/orders/:id", orderLookupLimiter);
+
+app.post("/api/charm-bar", charmBarLimiter);
+app.get("/api/charm-bar", adminLimiter);
+app.put("/api/charm-bar/:id/status", adminLimiter);
+
+app.post("/api/gift-certificates", giftCertificateLimiter);
+app.get("/api/gift-certificates", adminLimiter);
+app.put("/api/gift-certificates/:id/status", adminLimiter);
 
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
+app.use("/api/images", imagesRouter);
 app.use("/api/content", contentRouter);
 app.use("/api/collections", collectionsRouter);
 app.use("/api/charm-bar", charmBarRouter);
 app.use("/api/gift-certificates", giftCertificatesRouter);
 
 app.use((err, req, res, next) => {
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ error: "La imagen pesa más de 2 MB" });
+  }
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ error: "Los datos enviados son demasiado grandes" });
+  }
+  if (err.name === "MulterError") {
+    return res.status(400).json({ error: "No se pudo procesar el archivo" });
+  }
   console.error("Error no manejado:", err);
   res.status(500).json({ error: "Error interno del servidor" });
 });
