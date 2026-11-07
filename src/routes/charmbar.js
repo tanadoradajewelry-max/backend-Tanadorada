@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { query } from "../lib/db.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import { sendCharmBarEmail } from "../lib/mailer.js";
+import {
+  getWhatsappSettings,
+  buildCharmBarWhatsappUrl,
+} from "../lib/whatsapp.js";
 
 export const charmBarRouter = Router();
 
@@ -120,7 +124,27 @@ charmBarRouter.post("/", async (req, res) => {
     // No se espera: si el correo falla, la solicitud ya quedó guardada.
     sendCharmBarEmail({ id, ...data });
 
-    res.status(201).json({ ok: true });
+    // El mensaje de WhatsApp es un extra: si todavía no guardas tu número en
+    // el panel, la solicitud igual se registra y te llega por correo.
+    let whatsappUrl = null;
+    try {
+      const settings = await getWhatsappSettings();
+      if (settings) {
+        whatsappUrl = buildCharmBarWhatsappUrl({
+          settings,
+          requestId: id,
+          request: data,
+        });
+      }
+    } catch (whatsappError) {
+      console.error("No se pudo armar el link de WhatsApp:", whatsappError);
+    }
+
+    res.status(201).json({
+      ok: true,
+      reference: id.slice(-8).toUpperCase(),
+      whatsappUrl,
+    });
   } catch (error) {
     console.error("Error guardando solicitud de Charm Bar:", error);
     res.status(500).json({ error: "No se pudo enviar la solicitud" });
