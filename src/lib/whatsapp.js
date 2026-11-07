@@ -110,3 +110,59 @@ export function buildGiftCertificateWhatsappUrl({
 
   return `https://wa.me/${settings.number}?text=${encodeURIComponent(text)}`;
 }
+
+// =====================================================================
+// ✅ CÓDIGO AGREGADO: CHARM BAR EXPERIENCE
+// =====================================================================
+
+const CHARM_BAR_INTRO =
+  "Hola Tanadorada 👋 Quiero solicitar mi Charm Bar Experience. Me gustaría conversar sobre mi evento y recibir una propuesta y cotización.";
+
+// "2026-12-05" -> "05/12/2026"
+function formatEventDate(value) {
+  const [year, month, day] = String(value).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : String(value);
+}
+
+// Link de WhatsApp con la solicitud de Charm Bar ya escrita.
+// "request" son los datos ya limpios del formulario.
+export function buildCharmBarWhatsappUrl({ settings, requestId, request }) {
+  // Todo en una línea y con largo máximo, para que el mensaje quede ordenado.
+  const flat = (value, max) =>
+    String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+
+  // "Hosted Experience: quiero regalar..." -> "Hosted Experience"
+  const experience = flat(String(request.experienceType).split(":")[0], 60);
+
+  const place = [flat(request.venueType, 160), flat(request.location, 200)]
+    .filter(Boolean)
+    .join(" — ");
+
+  const lines = [
+    `Ocasión: ${flat(request.occasion, 120)}`,
+    `Fecha: ${formatEventDate(request.eventDate)}`,
+    `Invitados: ${flat(request.guests, 120)}`,
+    `Lugar: ${place}`,
+    `Experiencia: ${experience}`,
+    request.customize && `Personalizar: ${flat(request.customize, 160)}`,
+    request.duration && `Duración: ${flat(request.duration, 120)}`,
+    request.budget && `Presupuesto: ${flat(request.budget, 100)}`,
+    request.details && `Detalles: ${flat(request.details, 200)}`,
+  ].filter(Boolean);
+
+  const company = request.company
+    ? [`Empresa o marca: ${flat(request.company, 120)}`]
+    : [];
+
+  const text = [
+    CHARM_BAR_INTRO,
+    "",
+    `Charm Bar Experience #${requestId.slice(-8).toUpperCase()}`,
+    ...lines,
+    "",
+    `Nombre: ${flat(request.fullName, 120)}`,
+    ...company,
+  ].join("\n");
+
+  return `https://wa.me/${settings.number}?text=${encodeURIComponent(text)}`;
+}
