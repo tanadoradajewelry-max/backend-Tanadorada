@@ -47,15 +47,11 @@ export const giftCertificateLimiter = rateLimit({
   },
 });
 
-// ✅ NUEVO: Límite para el buscador de productos (público).
-// Permite 60 búsquedas por minuto por IP, suficiente para clientes reales
-// pero frena intentos de saturar tu base de datos.
+// ✅ NUEVO: buscador de la tienda. Público, con tope para evitar abusos.
 export const searchLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minuto
+  windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  message: {
-    error: "Demasiadas búsquedas. Espera un momento e intenta de nuevo.",
-  },
+  message: { error: "Demasiadas búsquedas. Espera un momento." },
 });
