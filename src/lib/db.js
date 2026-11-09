@@ -5,12 +5,12 @@ import "dotenv/config";
 export const pool = mysql.createPool({
   uri: process.env.DATABASE_URL,
   waitForConnections: true,
-  connectionLimit: 8, // deja margen: los planes compartidos limitan conexiones por usuario
-  queueLimit: 50, // si hay más de 50 esperando, falla rápido en vez de colgarse 55 s
+  connectionLimit: 3, // deja margen: los planes compartidos limitan conexiones por usuario
+  queueLimit: 30, // si hay más de 50 esperando, falla rápido en vez de colgarse 55 s
   connectTimeout: 10000, // 10 s máximo para abrir una conexión
   enableKeepAlive: true,
   keepAliveInitialDelay: 10000,
-  maxIdle: 4, // conexiones inactivas que se conservan
+  maxIdle: 2, // conexiones inactivas que se conservan
   idleTimeout: 60000, // cierra las inactivas después de 60 s
   ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined,
   timezone: "Z",
