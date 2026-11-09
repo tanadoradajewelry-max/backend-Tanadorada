@@ -13,12 +13,12 @@ const MAX_DESCRIPTION = 600;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-// El listado NO incluye "images" (la galería) ni "description": las páginas
-// de catálogo solo muestran la foto principal y el precio. Sí incluye
-// "imageCount" (un número chico) para saber qué productos tienen segunda
-// foto, y "sizes" y "stock" (son cortos).
+// El listado NO incluye "images" (la galería) ni "description".
+// Si la foto principal está guardada como base64 (data:...), NO se manda:
+// la columna sale vacía y el handler pone la dirección de la imagen real
+// (/api/products/:id/image/0). Así el listado pesa KB en vez de MB.
 const LIST_COLUMNS =
-  "id, title, price, image, imageCount, badge, category, collection, sizes, stock, createdAt";
+  "id, title, price, IF(LEFT(image, 5) = 'data:', NULL, image) AS image, imageCount, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
@@ -61,9 +61,8 @@ function withSizes(row) {
 }
 
 // ---------------------------------------------------------------------------
-// Buscador: índice en memoria. La consulta pesada corre como máximo una vez
-// cada 5 minutos (o cuando creas, editas o borras un producto), no en cada
-// tecla que escribe la clienta.
+// Buscador: índice en memoria. La consulta corre como máximo una vez cada
+// 5 minutos (o cuando creas, editas o borras un producto), no en cada tecla.
 // ---------------------------------------------------------------------------
 const SEARCH_MAX_RESULTS = 8;
 const SEARCH_CACHE_MS = 5 * 60 * 1000;
@@ -181,7 +180,21 @@ productsRouter.get("/", async (req, res) => {
       params
     );
 
-    res.json(products.map(withSizes));
+    const base = (
+      process.env.PUBLIC_API_URL || `${req.protocol}://${req.get("host")}`
+    ).replace(/\/$/, "");
+
+    res.json(
+      products.map((row) =>
+        withSizes({
+          ...row,
+          // Foto en base64 -> se manda la dirección de la imagen real.
+          image:
+            row.image ||
+            `${base}/api/products/${encodeURIComponent(row.id)}/image/0`,
+        })
+      )
+    );
   } catch (error) {
     console.error("Error listando productos:", error);
     res.status(500).json({ error: "Error al listar productos" });
@@ -285,14 +298,16 @@ productsRouter.get("/:id/image/:index", async (req, res) => {
 
       res.set({
         "Content-Type": mime,
-        // 10 minutos: si cambias la foto en el panel, se actualiza pronto.
-        "Cache-Control": "public, max-age=600",
+        // 1 día: cada foto se pide una sola vez por visitante.
+        "Cache-Control": "public, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
       });
       return res.send(buffer);
     }
 
     // Foto guardada como enlace completo (productos muy viejos)
     if (/^https?:\/\//i.test(source)) {
+      res.set("Cache-Control", "public, max-age=3600");
       return res.redirect(302, source);
     }
 
@@ -427,7 +442,10 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     const fields = [];
     const values = [];
 
-    if (title !== undefined) { fields.push("title = ?"); values.push(title); }
+    if (title !== undefined) {
+      fields.push("title = ?");
+      values.push(title);
+    }
 
     // Tallas: si vienen en la petición se reemplazan por completo
     // (una lista vacía las quita todas).
@@ -474,13 +492,25 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       values.push(image);
     }
 
-    if (badge !== undefined) { fields.push("badge = ?"); values.push(badge || null); }
-    if (category !== undefined) { fields.push("category = ?"); values.push(category || null); }
-    if (collection !== undefined) { fields.push("collection = ?"); values.push(collection || null); }
+    if (badge !== undefined) {
+      fields.push("badge = ?");
+      values.push(badge || null);
+    }
+    if (category !== undefined) {
+      fields.push("category = ?");
+      values.push(category || null);
+    }
+    if (collection !== undefined) {
+      fields.push("collection = ?");
+      values.push(collection || null);
+    }
 
     if (fields.length > 0) {
       values.push(req.params.id);
-      await query(`UPDATE Product SET ${fields.join(", ")} WHERE id = ?`, values);
+      await query(
+        `UPDATE Product SET ${fields.join(", ")} WHERE id = ?`,
+        values
+      );
     }
 
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
