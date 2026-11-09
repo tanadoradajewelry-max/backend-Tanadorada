@@ -5,10 +5,19 @@ import "dotenv/config";
 export const pool = mysql.createPool({
   uri: process.env.DATABASE_URL,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+  connectionLimit: 8, // deja margen: los planes compartidos limitan conexiones por usuario
+  queueLimit: 50, // si hay más de 50 esperando, falla rápido en vez de colgarse 55 s
+  connectTimeout: 10000, // 10 s máximo para abrir una conexión
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
+  maxIdle: 4, // conexiones inactivas que se conservan
+  idleTimeout: 60000, // cierra las inactivas después de 60 s
+  ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : undefined,
   timezone: "Z",
   dateStrings: false,
+  // Seguridad: si llega un objeto (por ejemplo ?category[a]=1) NO se expande
+  // a SQL; se convierte en texto inofensivo.
+  stringifyObjects: true,
 });
 
 export async function query(sql, params = []) {
@@ -21,14 +30,14 @@ export async function queryOne(sql, params = []) {
   return rows[0] || null;
 }
 
-// Ya NO llama a process.exit. Solo loguea si falla.
 export async function testConnection() {
   try {
     const conn = await pool.getConnection();
     await conn.ping();
     conn.release();
-    console.log("✅ Conectado a MySQL");
+    console.log("✅ Conectado a MySQL en Hostinger");
   } catch (err) {
-    console.error("⚠️ Error conectando a MySQL:", err.message);
+    console.error("❌ Error conectando a MySQL:", err.message);
+    process.exit(1);
   }
 }
