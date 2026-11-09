@@ -18,7 +18,8 @@ import {
   adminLimiter,
   orderLimiter,
   charmBarLimiter,
-  giftCertificateLimiter, // ✅ NUEVO LIMITADOR
+  giftCertificateLimiter,
+  searchLimiter,
 } from "./middleware/rateLimiters.js";
 import { adminRouter } from "./routes/admin.js";
 
@@ -129,6 +130,7 @@ app.put("/api/charm-bar/:id/status", adminLimiter);
 app.post("/api/gift-certificates", giftCertificateLimiter); // solicitud pública
 app.get("/api/gift-certificates", adminLimiter); // ver lista (solo admin)
 app.put("/api/gift-certificates/:id/status", adminLimiter); // cambiar estado (solo admin)
+app.get("/api/products/search", searchLimiter); // buscador de la tienda (público, con tope)
 
 // --- Enrutadores (Routers) ---
 app.use("/api/products", productsRouter);
