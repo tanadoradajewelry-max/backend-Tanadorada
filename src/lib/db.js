@@ -30,6 +30,8 @@ export async function queryOne(sql, params = []) {
   return rows[0] || null;
 }
 
+// Solo avisa en el log si la base de datos no responde al arrancar.
+// Ya no cierra la app (process.exit), para que se recupere sola.
 export async function testConnection() {
   try {
     const conn = await pool.getConnection();
@@ -38,6 +40,5 @@ export async function testConnection() {
     console.log("✅ Conectado a MySQL en Hostinger");
   } catch (err) {
     console.error("❌ Error conectando a MySQL:", err.message);
-    process.exit(1);
   }
 }
