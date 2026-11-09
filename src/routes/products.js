@@ -9,32 +9,19 @@ import { parseStock } from "../lib/stock.js";
 export const productsRouter = Router();
 
 const MAX_IMAGES = 5;
-const MAX_DESCRIPTION = 600;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
-const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-// El listado NO incluye "images" (la galería) ni "description": las páginas
-// de catálogo solo muestran la foto principal y el precio. Sí incluye
-// "imageCount" (un número chico) para saber qué productos tienen segunda
-// foto, y "sizes" y "stock" (son cortos).
+// El listado NO incluye "images" (la galería): las páginas de catálogo solo
+// muestran la foto principal, y así no cargan 3 fotos por producto.
+// Sí incluye "sizes" y "stock" (son cortos) para mostrar "Desde" y "Agotado".
 const LIST_COLUMNS =
-  "id, title, price, image, imageCount, badge, category, collection, sizes, stock, createdAt";
+  "id, title, price, image, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
   return images
     .filter((src) => typeof src === "string" && src.length > 0)
     .slice(0, MAX_IMAGES);
-}
-
-// Minidescripción: texto sin espacios de más y con un largo máximo.
-// Vacía = el producto no muestra descripción.
-function cleanDescription(value) {
-  const text = String(value ?? "")
-    .replace(/\r\n/g, "\n")
-    .trim()
-    .slice(0, MAX_DESCRIPTION);
-  return text || null;
 }
 
 // La galería se guarda como texto JSON; aquí vuelve a ser una lista.
@@ -91,67 +78,111 @@ productsRouter.get("/", async (req, res) => {
   }
 });
 
-// GET /api/products/:id/image/:index — una foto del producto como IMAGEN
-// de verdad (no como texto dentro de un JSON). Así el navegador la guarda y
-// no la vuelve a descargar. index 0 = la principal, 1 = la segunda, etc.
-productsRouter.get("/:id/image/:index", async (req, res) => {
-  try {
-    const index = Number(req.params.index);
+// --- Buscador de la tienda (público) ---
+// GET /api/products/search?q=anillo
+// Busca en el nombre del producto, su categoría y su colección, sin importar
+// mayúsculas ni acentos. Devuelve solo datos livianos (sin fotos): las fotos
+// se piden aparte, como imágenes.
+const SEARCH_MAX_RESULTS = 12;
 
-    if (!Number.isInteger(index) || index < 0 || index >= MAX_IMAGES) {
-      return res.status(404).end();
+const normalizeSearch = (text) =>
+  String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+function parseJsonValue(value) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+productsRouter.get("/search", async (req, res) => {
+  try {
+    const term = normalizeSearch(String(req.query.q ?? "").slice(0, 60));
+
+    if (term.length < 2) {
+      return res.json({ results: [], total: 0 });
     }
 
-    // Se lee solo la columna que hace falta: la galería puede pesar varios MB.
-    const column = index === 0 ? "image" : "images";
-    const row = await queryOne(
-      `SELECT ${column} AS source FROM Product WHERE id = ?`,
-      [req.params.id]
+    // "plainImage" es la foto solo cuando es una dirección corta (como
+    // /img/3.jpg); si está guardada como texto base64 se deja vacía para no
+    // mandar fotos pesadas dentro de la búsqueda.
+    const [rows, collectionRows, categoriesRow] = await Promise.all([
+      query(
+        `SELECT id, title, price, category, collection, sizes, stock,
+                IF(LEFT(image, 5) = 'data:', NULL, image) AS plainImage
+         FROM Product`
+      ),
+      query("SELECT id, name FROM Collection"),
+      queryOne("SELECT value FROM SiteContent WHERE `key` = ?", ["categories"]),
+    ]);
+
+    const savedCategories = parseJsonValue(categoriesRow?.value);
+    const categoryLabels = new Map(
+      (Array.isArray(savedCategories) ? savedCategories : [])
+        .filter((c) => c && typeof c.slug === "string")
+        .map((c) => [c.slug, String(c.label ?? c.slug)])
+    );
+    const collectionNames = new Map(collectionRows.map((c) => [c.id, c.name]));
+
+    const tokens = term.split(" ");
+    const matches = [];
+
+    for (const row of rows) {
+      const title = normalizeSearch(row.title);
+      const categoryLabel = categoryLabels.get(row.category) ?? row.category ?? "";
+      const collectionName = collectionNames.get(row.collection) ?? "";
+
+      const haystack = [
+        title,
+        normalizeSearch(categoryLabel),
+        normalizeSearch(row.category),
+        normalizeSearch(collectionName),
+      ].join(" ");
+
+      // Cada palabra que escribió la persona tiene que aparecer en algún lado.
+      if (!tokens.every((token) => haystack.includes(token))) continue;
+
+      // Primero los que empiezan igual, luego los que lo contienen, y al
+      // final los que coinciden solo por categoría o colección.
+      let rank = 3;
+      if (title.startsWith(term)) rank = 0;
+      else if (title.includes(term)) rank = 1;
+      else if (tokens.every((token) => title.includes(token))) rank = 2;
+
+      matches.push({ rank, row, categoryLabel, collectionName });
+    }
+
+    matches.sort(
+      (a, b) => a.rank - b.rank || a.row.title.localeCompare(b.row.title, "es")
     );
 
-    if (!row || !row.source) return res.status(404).end();
+    const results = matches
+      .slice(0, SEARCH_MAX_RESULTS)
+      .map(({ row, categoryLabel, collectionName }) => ({
+        id: row.id,
+        title: row.title,
+        price: row.price,
+        sizes: parseSizes(row.sizes),
+        stock: row.stock,
+        plainImage: row.plainImage,
+        categoryLabel,
+        collectionName,
+      }));
 
-    let source = row.source;
-
-    if (index > 0) {
-      try {
-        source = cleanImages(JSON.parse(row.source))[index];
-      } catch {
-        source = null;
-      }
-    }
-
-    if (!source) return res.status(404).end();
-
-    // Foto guardada como texto: data:image/jpeg;base64,XXXX
-    if (source.startsWith("data:")) {
-      const marker = source.indexOf(";base64,");
-      const mime = marker > 5 ? source.slice(5, marker) : "";
-
-      // Solo se sirven imágenes: nunca otro tipo de archivo.
-      if (!ALLOWED_IMAGE_TYPES.includes(mime)) return res.status(404).end();
-
-      const buffer = Buffer.from(source.slice(marker + 8), "base64");
-
-      res.set({
-        "Content-Type": mime,
-        // 10 minutos: si cambias la foto en el panel, se actualiza pronto.
-        "Cache-Control": "public, max-age=600",
-      });
-      return res.send(buffer);
-    }
-
-    // Foto guardada como enlace completo (productos muy viejos)
-    if (/^https?:\/\//i.test(source)) {
-      return res.redirect(302, source);
-    }
-
-    return res.status(404).end();
+    res.json({ results, total: matches.length });
   } catch (error) {
-    console.error("Error sirviendo la foto del producto:", error);
-    res.status(500).end();
+    console.error("Error en la búsqueda:", error);
+    res.status(500).json({ error: "No se pudo buscar" });
   }
 });
+// ---------------------------------------
 
 productsRouter.get("/:id", async (req, res) => {
   try {
@@ -181,7 +212,6 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
-      description,
       badge,
       category,
       collection,
@@ -216,17 +246,15 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, imageCount, sizes, stock, description, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
         finalPrice,
         mainImage,
         gallery.length ? JSON.stringify(gallery) : null,
-        Math.max(gallery.length, 1),
         sizeList.length ? JSON.stringify(sizeList) : null,
         stockValue,
-        cleanDescription(description),
         badge || null,
         category || null,
         collection || null,
@@ -250,7 +278,6 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
-      description,
       badge,
       category,
       collection,
@@ -301,19 +328,11 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       values.push(stockValue);
     }
 
-    // Minidescripción: si viene en la petición se reemplaza (vacía = se quita).
-    if (description !== undefined) {
-      fields.push("description = ?");
-      values.push(cleanDescription(description));
-    }
-
     if (images !== undefined) {
       // Con galería: la primera foto es siempre la principal (image).
       const gallery = cleanImages(images);
       fields.push("images = ?");
       values.push(gallery.length ? JSON.stringify(gallery) : null);
-      fields.push("imageCount = ?");
-      values.push(Math.max(gallery.length, 1));
       if (gallery.length) {
         fields.push("image = ?");
         values.push(gallery[0]);
