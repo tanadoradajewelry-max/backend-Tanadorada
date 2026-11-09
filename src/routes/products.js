@@ -11,11 +11,10 @@ export const productsRouter = Router();
 const MAX_IMAGES = 5;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
 
-// El listado NO incluye "images" (la galería): las páginas de catálogo solo
-// muestran la foto principal, y así no cargan 3 fotos por producto.
-// Sí incluye "sizes" y "stock" (son cortos) para mostrar "Desde" y "Agotado".
+// ✅ SOLUCIÓN: Si la imagen empieza con 'data:', significa que es Base64.
+// En ese caso, enviamos NULL en lugar del texto gigante para que la página no se trabe.
 const LIST_COLUMNS =
-  "id, title, price, image, badge, category, collection, sizes, stock, createdAt";
+  "id, title, price, IF(LEFT(image, 5) = 'data:', NULL, image) AS image, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
@@ -25,8 +24,6 @@ function cleanImages(images) {
 }
 
 // La galería se guarda como texto JSON; aquí vuelve a ser una lista.
-// Los productos viejos (sin galería) devuelven [image], así el frontend
-// siempre recibe una lista.
 function withGallery(row) {
   if (!row) return row;
   let images = [];
@@ -79,10 +76,6 @@ productsRouter.get("/", async (req, res) => {
 });
 
 // --- Buscador de la tienda (público) ---
-// GET /api/products/search?q=anillo
-// Busca en el nombre del producto, su categoría y su colección, sin importar
-// mayúsculas ni acentos. Devuelve solo datos livianos (sin fotos): las fotos
-// se piden aparte, como imágenes.
 const SEARCH_MAX_RESULTS = 12;
 
 const normalizeSearch = (text) =>
@@ -110,9 +103,6 @@ productsRouter.get("/search", async (req, res) => {
       return res.json({ results: [], total: 0 });
     }
 
-    // "plainImage" es la foto solo cuando es una dirección corta (como
-    // /img/3.jpg); si está guardada como texto base64 se deja vacía para no
-    // mandar fotos pesadas dentro de la búsqueda.
     const [rows, collectionRows, categoriesRow] = await Promise.all([
       query(
         `SELECT id, title, price, category, collection, sizes, stock,
@@ -146,11 +136,8 @@ productsRouter.get("/search", async (req, res) => {
         normalizeSearch(collectionName),
       ].join(" ");
 
-      // Cada palabra que escribió la persona tiene que aparecer en algún lado.
       if (!tokens.every((token) => haystack.includes(token))) continue;
 
-      // Primero los que empiezan igual, luego los que lo contienen, y al
-      // final los que coinciden solo por categoría o colección.
       let rank = 3;
       if (title.startsWith(term)) rank = 0;
       else if (title.includes(term)) rank = 1;
@@ -182,7 +169,6 @@ productsRouter.get("/search", async (req, res) => {
     res.status(500).json({ error: "No se pudo buscar" });
   }
 });
-// ---------------------------------------
 
 productsRouter.get("/:id", async (req, res) => {
   try {
@@ -220,11 +206,9 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     const gallery = cleanImages(images);
     const mainImage = gallery[0] || image;
 
-    // Con tallas, el precio del producto es el de la talla más barata.
     const sizeList = cleanSizes(sizes);
     const finalPrice = sizeList.length ? minSizePrice(sizeList) : Number(price);
 
-    // Sin stock en la petición = el producto no controla stock.
     const stockValue = stock === undefined ? null : parseStock(stock);
     if (stockValue === undefined) {
       return res.status(400).json({ error: STOCK_ERROR });
@@ -290,8 +274,6 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       return res.status(404).json({ error: "Producto no encontrado" });
     }
 
-    // Stock: si viene en la petición se reemplaza (vacío = dejar de
-    // controlarlo); si no viene, no se toca.
     let stockValue;
     if (stock !== undefined) {
       stockValue = parseStock(stock);
@@ -305,8 +287,6 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
 
     if (title !== undefined) { fields.push("title = ?"); values.push(title); }
 
-    // Tallas: si vienen en la petición se reemplazan por completo
-    // (una lista vacía las quita todas).
     const sizeList = sizes !== undefined ? cleanSizes(sizes) : undefined;
 
     if (sizeList !== undefined) {
@@ -315,7 +295,6 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     }
 
     if (sizeList?.length) {
-      // Con tallas, el precio del producto es el de la talla más barata.
       fields.push("price = ?");
       values.push(minSizePrice(sizeList));
     } else if (price !== undefined) {
@@ -329,7 +308,6 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     }
 
     if (images !== undefined) {
-      // Con galería: la primera foto es siempre la principal (image).
       const gallery = cleanImages(images);
       fields.push("images = ?");
       values.push(gallery.length ? JSON.stringify(gallery) : null);
