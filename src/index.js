@@ -4,7 +4,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import { pool } from "./lib/db.js";
+import { pool, testConnection } from "./lib/db.js";
 import { productsRouter } from "./routes/products.js";
 import { ordersRouter } from "./routes/orders.js";
 import { uploadRouter, imagesRouter } from "./routes/upload.js";
@@ -22,9 +22,18 @@ import {
 } from "./middleware/rateLimiters.js";
 import { adminRouter } from "./routes/admin.js";
 
+// ✅ Un error suelto (por ejemplo, un correo que falla) ya no tumba la app.
+process.on("unhandledRejection", (err) => {
+  console.error("Promesa rechazada sin manejar:", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Excepción no capturada:", err);
+});
+
 const app = express();
 
-// Hostinger pone un proxy delante de tu app.
+// Hostinger pone un proxy delante de tu app. Con esta línea los límites de
+// intentos leen la IP real de cada visitante.
 app.set("trust proxy", 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || "")
@@ -32,28 +41,18 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
   .map((o) => o.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-console.log("✅ Orígenes permitidos (CORS):", allowedOrigins);
-
-// 1. HELMET (Seguridad)
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
   })
 );
 
-// 2. CORS (Permisos)
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Permitir peticiones sin origen (Postman, health checks)
       if (!origin) return callback(null, true);
-      
       const clean = origin.replace(/\/$/, "");
-      if (allowedOrigins.includes(clean)) {
-        return callback(null, true);
-      }
-      
-      console.error(`🚨 CORS bloqueado para el origen: ${origin}`);
+      if (allowedOrigins.includes(clean)) return callback(null, true);
       return callback(null, false);
     },
     credentials: true,
@@ -62,11 +61,7 @@ app.use(
   })
 );
 
-// 🚨 3. RESPONDER A OPTIONS INMEDIATAMENTE (Esto arregla el error 504)
-// Cualquier petición de verificación (Preflight) se responde aquí mismo sin pasar a los limitadores.
-app.options("*", cors());
-
-// 4. PARSEADOR DE JSON
+// Cuando todas las fotos nuevas estén subidas como URL, baja esto a "1mb".
 app.use(express.json({ limit: "15mb" }));
 
 // Límite para consultar/confirmar pedidos desde la página pública.
@@ -78,7 +73,40 @@ const orderLookupLimiter = rateLimit({
   message: { error: "Demasiados intentos. Espera unos minutos." },
 });
 
-// --- RUTAS BÁSICAS ---
+// --- Caché corta en memoria para datos que casi no cambian ---
+// Así la portada y los catálogos no consultan MySQL en cada visita.
+// Cuando guardas algo desde el panel (PUT/POST/DELETE) la caché se limpia sola.
+const responseCache = new Map();
+
+function cacheGet(seconds) {
+  return (req, res, next) => {
+    if (req.method !== "GET") {
+      responseCache.clear();
+      return next();
+    }
+
+    const key = req.originalUrl;
+    const hit = responseCache.get(key);
+
+    if (hit && hit.expires > Date.now()) {
+      res.set("Cache-Control", `public, max-age=${seconds}`);
+      return res.json(hit.body);
+    }
+
+    const send = res.json.bind(res);
+    res.json = (body) => {
+      if (res.statusCode === 200) {
+        res.set("Cache-Control", `public, max-age=${seconds}`);
+        responseCache.set(key, { body, expires: Date.now() + seconds * 1000 });
+        // Evita que el mapa crezca sin fin.
+        if (responseCache.size > 200) responseCache.clear();
+      }
+      return send(body);
+    };
+    next();
+  };
+}
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
@@ -86,7 +114,7 @@ app.get("/api/health", (req, res) => {
 app.get("/api/admin/verify", adminLimiter, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
-
+// Resumen de números para el panel de inicio (solo admin).
 app.use("/api/admin", adminLimiter, requireAdmin, adminRouter);
 
 app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => {
@@ -113,7 +141,7 @@ app.get("/api/health/detailed", adminLimiter, requireAdmin, async (req, res) => 
 
 app.get("/api/my-ip", (req, res) => res.json({ ip: req.ip }));
 
-// --- LÍMITES DE INTENTOS ---
+// --- Límites de intentos ---
 const isGet = (req) => req.method === "GET";
 
 app.use("/api/upload", adminLimiter);
@@ -127,27 +155,29 @@ app.use("/api/products", (req, res, next) =>
   req.headers["x-admin-password"] ? adminLimiter(req, res, next) : next()
 );
 
-// --- RUTAS DE PEDIDOS ---
-app.get("/api/orders", adminLimiter);
-app.post("/api/orders", orderLimiter);
-app.put("/api/orders/:id/status", adminLimiter);
-app.post("/api/orders/:id/capture", orderLookupLimiter);
-app.get("/api/orders/:id", orderLookupLimiter);
+// --- Rutas de Pedidos ---
+app.get("/api/orders", adminLimiter); // listado de pedidos (solo admin)
+app.post("/api/orders", orderLimiter); // crear pedido (público, con tope)
+app.put("/api/orders/:id/status", adminLimiter); // cambiar estado (solo admin)
+app.post("/api/orders/:id/capture", orderLookupLimiter); // confirmar pago
+app.get("/api/orders/:id", orderLookupLimiter); // ver un pedido
 
-// --- RUTAS DE CHARM BAR ---
+// --- Rutas de Charm Bar ---
 app.post("/api/charm-bar", charmBarLimiter);
 app.get("/api/charm-bar", adminLimiter);
 app.put("/api/charm-bar/:id/status", adminLimiter);
 
-// --- RUTAS DE CERTIFICADOS DE REGALO ---
-app.post("/api/gift-certificates", giftCertificateLimiter);
-app.get("/api/gift-certificates", adminLimiter);
-app.put("/api/gift-certificates/:id/status", adminLimiter);
+// --- Certificados de Regalo ---
+app.post("/api/gift-certificates", giftCertificateLimiter); // solicitud pública
+app.get("/api/gift-certificates", adminLimiter); // ver lista (solo admin)
+app.put("/api/gift-certificates/:id/status", adminLimiter); // cambiar estado (solo admin)
+app.get("/api/products/search", searchLimiter); // buscador de la tienda (público, con tope)
 
-// --- RUTA DE BÚSQUEDA ---
-app.get("/api/products/search", searchLimiter);
+// --- Caché (30 s) para colecciones y contenido ---
+app.use("/api/collections", cacheGet(30));
+app.use("/api/content", cacheGet(30));
 
-// --- ENRUTADORES (ROUTERS) ---
+// --- Enrutadores (Routers) ---
 app.use("/api/products", productsRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/upload", uploadRouter);
@@ -157,13 +187,15 @@ app.use("/api/collections", collectionsRouter);
 app.use("/api/charm-bar", charmBarRouter);
 app.use("/api/gift-certificates", giftCertificatesRouter);
 
-// --- MANEJO DE ERRORES GLOBAL ---
+// --- Manejo de Errores Global ---
 app.use((err, req, res, next) => {
   if (err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ error: "La imagen pesa más de 2 MB" });
   }
   if (err.type === "entity.too.large") {
-    return res.status(413).json({ error: "Los datos enviados son demasiado grandes" });
+    return res
+      .status(413)
+      .json({ error: "Los datos enviados son demasiado grandes" });
   }
   if (err.name === "MulterError") {
     return res.status(400).json({ error: "No se pudo procesar el archivo" });
@@ -172,19 +204,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Error interno del servidor" });
 });
 
-// --- ESCUCHAR EN EL PUERTO CORRECTO ---
 const PORT = process.env.PORT || 4000;
-
-// Escuchar en 0.0.0.0 es obligatorio en Hostinger para que el proxy enrute el tráfico
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`✅ API corriendo en puerto ${PORT}`);
-});
-
-// Manejadores de errores para evitar que el proceso se apague en silencio
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("🚨 Unhandled Rejection at:", promise, "reason:", reason);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("🚨 Uncaught Exception:", error);
+  testConnection();
 });
