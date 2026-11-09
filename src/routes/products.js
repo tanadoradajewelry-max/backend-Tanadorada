@@ -9,19 +9,32 @@ import { parseStock } from "../lib/stock.js";
 export const productsRouter = Router();
 
 const MAX_IMAGES = 5;
+const MAX_DESCRIPTION = 600;
 const STOCK_ERROR = "El stock debe ser un número entero, 0 o mayor";
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-// El listado NO incluye "images" (la galería): las páginas de catálogo solo
-// muestran la foto principal, y así no cargan 3 fotos por producto.
-// Sí incluye "sizes" y "stock" (son cortos) para mostrar "Desde" y "Agotado".
+// El listado NO incluye "images" (la galería) ni "description": las páginas
+// de catálogo solo muestran la foto principal y el precio. Sí incluye
+// "imageCount" (un número chico) para saber qué productos tienen segunda
+// foto, y "sizes" y "stock" (son cortos).
 const LIST_COLUMNS =
-  "id, title, price, image, badge, category, collection, sizes, stock, createdAt";
+  "id, title, price, image, imageCount, badge, category, collection, sizes, stock, createdAt";
 
 function cleanImages(images) {
   if (!Array.isArray(images)) return [];
   return images
     .filter((src) => typeof src === "string" && src.length > 0)
     .slice(0, MAX_IMAGES);
+}
+
+// Minidescripción: texto sin espacios de más y con un largo máximo.
+// Vacía = el producto no muestra descripción.
+function cleanDescription(value) {
+  const text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim()
+    .slice(0, MAX_DESCRIPTION);
+  return text || null;
 }
 
 // La galería se guarda como texto JSON; aquí vuelve a ser una lista.
@@ -48,15 +61,14 @@ function withSizes(row) {
 }
 
 // ---------------------------------------------------------------------------
-// Índice de búsqueda en memoria: la consulta pesada corre 1 vez por minuto
-// (o cuando guardas/borras un producto), no en cada tecla.
+// Buscador: índice en memoria. La consulta pesada corre como máximo una vez
+// cada 5 minutos (o cuando creas, editas o borras un producto), no en cada
+// tecla que escribe la clienta.
 // ---------------------------------------------------------------------------
 const SEARCH_MAX_RESULTS = 8;
-const SEARCH_CACHE_MS = 60 * 1000;
+const SEARCH_CACHE_MS = 5 * 60 * 1000;
 let searchIndex = { data: null, expires: 0, loading: null };
 
-// Se llama al crear, editar o borrar un producto para que el buscador
-// muestre los cambios enseguida.
 export function invalidateSearchIndex() {
   searchIndex.expires = 0;
 }
@@ -79,8 +91,8 @@ function parseJsonValue(value) {
 }
 
 async function loadSearchIndex() {
-  // "plainImage" es la foto solo cuando es una dirección corta (como
-  // /img/3.jpg); si está guardada como base64 se deja vacía.
+  // "plainImage" es la foto solo cuando es una dirección corta; si está
+  // guardada como base64 queda vacía y la página usa /:id/image/0.
   const [rows, collectionRows, categoriesRow] = await Promise.all([
     query(
       `SELECT id, title, price, category, collection, sizes, stock,
@@ -99,7 +111,6 @@ async function loadSearchIndex() {
   );
   const collectionNames = new Map(collectionRows.map((c) => [c.id, c.name]));
 
-  // Todo se prepara una sola vez (texto normalizado, tallas ya convertidas).
   return rows.map((row) => {
     const categoryLabel =
       categoryLabels.get(row.category) ?? row.category ?? "";
@@ -126,7 +137,7 @@ async function getSearchIndex() {
     return searchIndex.data;
   }
 
-  // Si ya se está cargando, todos esperan la misma consulta.
+  // Si ya se está cargando, todas las búsquedas esperan la misma consulta.
   if (!searchIndex.loading) {
     searchIndex.loading = loadSearchIndex()
       .then((data) => {
@@ -177,8 +188,7 @@ productsRouter.get("/", async (req, res) => {
   }
 });
 
-// --- Buscador de la tienda (público) ---
-// GET /api/products/search?q=anillo
+// GET /api/products/search?q=anillo — buscador de la tienda (público).
 // IMPORTANTE: debe ir ANTES de "/:id", si no Express toma "search" como un id.
 productsRouter.get("/search", async (req, res) => {
   try {
@@ -231,53 +241,64 @@ productsRouter.get("/search", async (req, res) => {
   }
 });
 
-// --- Foto de un producto, servida como imagen real ---
-// GET /api/products/:id/image/0  (0 = principal, 1 = segunda...)
-// Lee solo las columnas necesarias y le dice al navegador que la guarde un
-// día, así cada foto se pide una sola vez por visitante.
-// IMPORTANTE: debe ir ANTES de "/:id".
+// GET /api/products/:id/image/:index — una foto del producto como IMAGEN
+// de verdad (no como texto dentro de un JSON). Así el navegador la guarda y
+// no la vuelve a descargar. index 0 = la principal, 1 = la segunda, etc.
 productsRouter.get("/:id/image/:index", async (req, res) => {
   try {
-    const index = Number.parseInt(req.params.index, 10);
+    const index = Number(req.params.index);
+
     if (!Number.isInteger(index) || index < 0 || index >= MAX_IMAGES) {
       return res.status(404).end();
     }
 
+    // Se lee solo la columna que hace falta: la galería puede pesar varios MB.
+    const column = index === 0 ? "image" : "images";
     const row = await queryOne(
-      "SELECT image, images FROM Product WHERE id = ?",
+      `SELECT ${column} AS source FROM Product WHERE id = ?`,
       [req.params.id]
     );
-    if (!row) return res.status(404).end();
 
-    let src = null;
-    if (index === 0) {
-      src = row.image;
-    } else {
-      const gallery = withGallery(row).images;
-      src = gallery[index] || null;
+    if (!row || !row.source) return res.status(404).end();
+
+    let source = row.source;
+
+    if (index > 0) {
+      try {
+        source = cleanImages(JSON.parse(row.source))[index];
+      } catch {
+        source = null;
+      }
     }
-    if (!src) return res.status(404).end();
 
-    // Foto guardada como base64: se convierte a imagen real.
-    const match = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/s.exec(src);
-    if (match) {
+    if (!source) return res.status(404).end();
+
+    // Foto guardada como texto: data:image/jpeg;base64,XXXX
+    if (source.startsWith("data:")) {
+      const marker = source.indexOf(";base64,");
+      const mime = marker > 5 ? source.slice(5, marker) : "";
+
+      // Solo se sirven imágenes: nunca otro tipo de archivo.
+      if (!ALLOWED_IMAGE_TYPES.includes(mime)) return res.status(404).end();
+
+      const buffer = Buffer.from(source.slice(marker + 8), "base64");
+
       res.set({
-        "Content-Type": match[1],
-        "Cache-Control": "public, max-age=86400",
-        "X-Content-Type-Options": "nosniff",
+        "Content-Type": mime,
+        // 10 minutos: si cambias la foto en el panel, se actualiza pronto.
+        "Cache-Control": "public, max-age=600",
       });
-      return res.send(Buffer.from(match[2], "base64"));
+      return res.send(buffer);
     }
 
-    // Foto guardada como dirección (por ejemplo /api/images/<id>).
-    if (/^https?:\/\//i.test(src)) {
-      res.set("Cache-Control", "public, max-age=3600");
-      return res.redirect(302, src);
+    // Foto guardada como enlace completo (productos muy viejos)
+    if (/^https?:\/\//i.test(source)) {
+      return res.redirect(302, source);
     }
 
     return res.status(404).end();
   } catch (error) {
-    console.error("Error sirviendo foto del producto:", error);
+    console.error("Error sirviendo la foto del producto:", error);
     res.status(500).end();
   }
 });
@@ -310,6 +331,7 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
+      description,
       badge,
       category,
       collection,
@@ -344,15 +366,17 @@ productsRouter.post("/", requireAdmin, async (req, res) => {
     }
 
     await query(
-      "INSERT INTO Product (id, title, price, image, images, sizes, stock, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO Product (id, title, price, image, images, imageCount, sizes, stock, description, badge, category, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         id,
         title,
         finalPrice,
         mainImage,
         gallery.length ? JSON.stringify(gallery) : null,
+        Math.max(gallery.length, 1),
         sizeList.length ? JSON.stringify(sizeList) : null,
         stockValue,
+        cleanDescription(description),
         badge || null,
         category || null,
         collection || null,
@@ -377,6 +401,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       images,
       sizes,
       stock,
+      description,
       badge,
       category,
       collection,
@@ -402,10 +427,7 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
     const fields = [];
     const values = [];
 
-    if (title !== undefined) {
-      fields.push("title = ?");
-      values.push(title);
-    }
+    if (title !== undefined) { fields.push("title = ?"); values.push(title); }
 
     // Tallas: si vienen en la petición se reemplazan por completo
     // (una lista vacía las quita todas).
@@ -430,11 +452,19 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       values.push(stockValue);
     }
 
+    // Minidescripción: si viene en la petición se reemplaza (vacía = se quita).
+    if (description !== undefined) {
+      fields.push("description = ?");
+      values.push(cleanDescription(description));
+    }
+
     if (images !== undefined) {
       // Con galería: la primera foto es siempre la principal (image).
       const gallery = cleanImages(images);
       fields.push("images = ?");
       values.push(gallery.length ? JSON.stringify(gallery) : null);
+      fields.push("imageCount = ?");
+      values.push(Math.max(gallery.length, 1));
       if (gallery.length) {
         fields.push("image = ?");
         values.push(gallery[0]);
@@ -444,25 +474,13 @@ productsRouter.put("/:id", requireAdmin, async (req, res) => {
       values.push(image);
     }
 
-    if (badge !== undefined) {
-      fields.push("badge = ?");
-      values.push(badge || null);
-    }
-    if (category !== undefined) {
-      fields.push("category = ?");
-      values.push(category || null);
-    }
-    if (collection !== undefined) {
-      fields.push("collection = ?");
-      values.push(collection || null);
-    }
+    if (badge !== undefined) { fields.push("badge = ?"); values.push(badge || null); }
+    if (category !== undefined) { fields.push("category = ?"); values.push(category || null); }
+    if (collection !== undefined) { fields.push("collection = ?"); values.push(collection || null); }
 
     if (fields.length > 0) {
       values.push(req.params.id);
-      await query(
-        `UPDATE Product SET ${fields.join(", ")} WHERE id = ?`,
-        values
-      );
+      await query(`UPDATE Product SET ${fields.join(", ")} WHERE id = ?`, values);
     }
 
     const product = await queryOne("SELECT * FROM Product WHERE id = ?", [
