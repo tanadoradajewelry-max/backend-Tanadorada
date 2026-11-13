@@ -4,6 +4,11 @@ import { requireAdmin } from "../middleware/requireAdmin.js";
 
 export const contentRouter = Router();
 
+// Bloques pesados (traen fotos) que NO se mandan en el listado general:
+// la portada los descargaría sin usarlos. Cada uno se pide aparte,
+// con GET /api/content/:key, solo donde se necesita.
+const LIST_EXCLUDED_KEYS = new Set(["nav_previews", "charm_bar_media"]);
+
 // MySQL/MariaDB a veces devuelve las columnas JSON como texto. Esto lo
 // convierte siempre en objeto, sin importar cómo llegue.
 function parseValue(value) {
@@ -15,12 +20,13 @@ function parseValue(value) {
   }
 }
 
-// GET /api/content — todos los bloques de una vez (la portada usa este).
+// GET /api/content — todos los bloques livianos de una vez (la portada).
 contentRouter.get("/", async (req, res) => {
   try {
     const rows = await query("SELECT `key`, value FROM SiteContent");
     const content = {};
     rows.forEach((row) => {
+      if (LIST_EXCLUDED_KEYS.has(row.key)) return;
       content[row.key] = parseValue(row.value);
     });
     res.json(content);
@@ -30,8 +36,8 @@ contentRouter.get("/", async (req, res) => {
   }
 });
 
-// GET /api/content/:key — UN solo bloque (la usa el submenú). Si todavía
-// no existe devuelve null con status 200, así no sale error en la consola.
+// GET /api/content/:key — UN solo bloque. Si todavía no existe devuelve
+// null con status 200, así no sale error en la consola.
 contentRouter.get("/:key", async (req, res) => {
   try {
     const row = await queryOne(
